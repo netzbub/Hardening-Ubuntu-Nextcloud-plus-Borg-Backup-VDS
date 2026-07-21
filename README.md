@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/github/v/tag/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?label=version&color=blue" alt="version">
-  <img src="https://img.shields.io/github/license/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?color=olive" alt="license">
+<img src="https://img.shields.io/github/license/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?color=olive&cacheSeconds=3600" alt="license">
   <img src="https://img.shields.io/github/last-commit/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?color=blueviolet" alt="last commit">
   <img src="https://img.shields.io/github/issues/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?color=yellow" alt="open issues">
   <img src="https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04">
