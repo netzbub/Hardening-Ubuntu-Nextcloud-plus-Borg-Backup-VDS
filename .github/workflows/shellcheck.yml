@@ -1,0 +1,32 @@
+name: ShellCheck
+
+# Runs on GitHub's servers (not locally) on every push / pull request that
+# touches a shell script, and can also be started by hand (workflow_dispatch).
+on:
+  push:
+    paths:
+      - "**.sh"
+      - ".github/workflows/shellcheck.yml"
+  pull_request:
+    paths:
+      - "**.sh"
+  workflow_dispatch:
+
+jobs:
+  shellcheck:
+    name: Lint shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # ShellCheck comes straight from the Ubuntu repos - no opaque third-party
+      # action, in keeping with the project's "no blind curl | bash" stance.
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # Start conservative: fail only on real errors (syntax / clear mistakes).
+      # Tighten later by lowering --severity to "warning" or "style" once the
+      # obvious warnings are addressed.
+      - name: Run ShellCheck
+        run: shellcheck --severity=error --shell=bash install.sh

@@ -6,6 +6,7 @@
   <img src="https://img.shields.io/github/last-commit/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?color=blueviolet" alt="last commit">
   <img src="https://img.shields.io/github/issues/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?color=yellow" alt="open issues">
   <img src="https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04">
+  <img src="https://github.com/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS/actions/workflows/shellcheck.yml/badge.svg" alt="ShellCheck">
 </p>
 
 *A phased, verifiable hardening and setup recipe for a single Ubuntu 24.04 VDS/VPS that runs a Nextcloud behind Caddy, doubles as an off-site Borg backup vault on a 4 TB disk for the operator's local (Mac) data, and exposes its admin panels only through a WireGuard tunnel.*
@@ -19,31 +20,33 @@ This is a personal-infrastructure project, not a product. It documents a concret
 ---
 
 <p align="center">
-<img src="images/Rudern-zwei-en.jpg" width="66%" alt="...">  
+<img src="images/Rudern-zwei-en.jpg" width="50%" alt="...">  
 </p>
 
-## Table of contents
+### Table of contents
 
 - [Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS](#hardening-ubuntu-nextcloud-plus-borg-backup-vds)
-  - [Table of contents](#table-of-contents)
-  - [Purpose](#purpose)
+    - [Table of contents](#table-of-contents)
+    - [Purpose](#purpose)
   - [Architecture and components](#architecture-and-components)
-  - [The stack as implemented](#the-stack-as-implemented)
-  - [Nextcloud data model: one-way upload plus one exchange folder](#nextcloud-data-model-one-way-upload-plus-one-exchange-folder)
+    - [The stack as implemented](#the-stack-as-implemented)
+    - [Nextcloud data model: one-way upload plus one exchange folder](#nextcloud-data-model-one-way-upload-plus-one-exchange-folder)
   - [Backup: 4 TB HDD plus Borg](#backup-4-tb-hdd-plus-borg)
-  - [Control panels: the two we chose](#control-panels-the-two-we-chose)
-  - [Hardening concept](#hardening-concept)
-  - [Installation: phased, tested, verified](#installation-phased-tested-verified)
-  - [Server directory structure](#server-directory-structure)
-  - [How far to harden — and where we deliberately stopped](#how-far-to-harden--and-where-we-deliberately-stopped)
-  - [Status and roadmap](#status-and-roadmap)
-  - [Genesis](#genesis)
-  - [License](#license)
-  - [Acknowledgments](#acknowledgments)
+    - [Control panels: the two we chose](#control-panels-the-two-we-chose)
+    - [Hardening concept](#hardening-concept)
+    - [Installation: phased, tested, verified](#installation-phased-tested-verified)
+    - [Server directory structure](#server-directory-structure)
+    - [How far to harden — and where we deliberately stopped](#how-far-to-harden--and-where-we-deliberately-stopped)
+    - [Status and roadmap](#status-and-roadmap)
+    - [Genesis](#genesis)
+    - [Version History](#version-history)
+    - [License](#license)
+    - [Acknowledgments](#acknowledgments)
+    - [Trademarks + Logos](#trademarks--logos)
 
 ---
 
-## Purpose
+### Purpose
 
 `Ubuntu 24.04` on a rented virtual server is an excellent base, but a fresh install is wide open: password SSH, root login, no firewall policy worth the name, no intrusion throttling, no audit trail, no backup. This project closes that gap in a **reproducible, reviewable** way and puts a useful workload on top of it — a private Nextcloud — without sacrificing the ability to actually operate the machine day to day.
 
@@ -74,7 +77,7 @@ The whole build is one machine. The 4 TB HDD is mounted at `/srv/hdd` and carrie
 
 ---
 
-## The stack as implemented
+### The stack as implemented
 
 The state this repository reflects — the design pursued and actually installed on the test server — is:
 
@@ -85,7 +88,7 @@ The state this repository reflects — the design pursued and actually installed
 
 ---
 
-## Nextcloud data model: one-way upload plus one exchange folder
+### Nextcloud data model: one-way upload plus one exchange folder
 
 A hard project rule, learned the painful way: **synchronisation from the local machine to Nextcloud must be one-way (local → remote).** Nextcloud must never write back to the local machine — a past bidirectional sync corrupted local data.
 
@@ -105,7 +108,7 @@ Backups are **event-triggered, not clock-based** (the operator works at night): 
 
 ---
 
-## Control panels: the two we chose
+### Control panels: the two we chose
 
 After surveying a field of lightweight panels (full comparison: [SCPs.md](SCPs.md) · [SCPs.de.md](SCPs.de.md)) the choice was two complementary tools rather than one heavy all-in-one:
 
@@ -116,7 +119,7 @@ Both are reachable **only** through the WireGuard tunnel; an earlier candidate (
 
 ---
 
-## Hardening concept
+### Hardening concept
 
 Mid-level overview, roughly in the order the script applies it:
 
@@ -137,7 +140,7 @@ Mid-level overview, roughly in the order the script applies it:
 
 ---
 
-## Installation: phased, tested, verified
+### Installation: phased, tested, verified
 
 Step-by-step operational companion: **[Install-Guide.md](Install-Guide.md)**.
 
@@ -157,7 +160,7 @@ Verification is not optional and not self-reported:
 
 ---
 
-## Server directory structure
+### Server directory structure
 
 Only what this project sets up and configures — not the Ubuntu standard tree:
 
@@ -206,7 +209,7 @@ Only what this project sets up and configures — not the Ubuntu standard tree:
 
 ---
 
-## How far to harden — and where we deliberately stopped
+### How far to harden — and where we deliberately stopped
 
 Hardening is only useful if the machine stays operable. Several conscious *non*-hardening decisions keep it that way:
 
@@ -220,19 +223,28 @@ These deviations are documented so a later audit (or a second reviewer) sees the
 
 ---
 
-## Status and roadmap
+### Status and roadmap
 
 Current status and the concrete next tasks live in **[Handover.md](Handover.md)**. In short: the individual hardening building blocks are verified on a test server, but the **assembled `install.sh` has not yet been run end-to-end**; the first production run must be phase-by-phase, followed by the external scan and restore test above.
 
 ---
 
-## Genesis
+### Genesis
 
 The idea and the concept are mine and I defined the requirements for the script. The design, scripting and review grew out of close teamwork with **Claude Opus 4.8** and **Claude Fable 5** (in Cowork), including repeated use of **two or three subagents** for independent "council" reviews of the hardening script — several rounds of which are recorded in the script's own change history. The recurring theme of that collaboration was exactly the trade-off above: how far to push hardening before it starts to cost operability, and where to consciously decide against a control in order to keep the server usable.
 
+
+
+### Version History
+
+| Version | Changes | Date |
+| :--- | :--- | :--- |
+| v0.1.0 | Initial release: install.sh, READMEs (EN/DE), install guide, SCPs comparison, security policy, changelog, GPL-3.0 license | 2026.07.21 |
+| v0.1.1 | ShellCheck GitHub Action (shellcheck.yml) + badge, additional paragraph concerning Version History inside README.md | 2026.07.21 |
+
 ---
 
-## License
+### License
 
 **GNU General Public License v3.0 or later (GPL-3.0-or-later).** You may use, redistribute, fork and modify this project, provided derivative work stays under the same license and the original source is credited. See [LICENSE](LICENSE).
 
@@ -240,8 +252,11 @@ Why GPL-3.0 and not a permissive license: the operator's intent is explicit shar
 
 ---
 
-## Acknowledgments
+### Acknowledgments
 
-- Design, scripting, documentation and review in teamwork with **Claude Opus 4.8** and **Claude Fable 5** (Cowork), with multi-agent council reviews of the hardening script.
+- Design, scripting, documentation and review in teamwork with `Claude Opus 4.8` and `Claude Fable 5` (Cowork), with multi-agent council reviews of the hardening script.
 - Built on the shoulders of the upstream projects: Ubuntu, Docker, Nextcloud, Caddy, WireGuard, BorgBackup, Runtipi, Cockpit, fail2ban, auditd, AIDE and Lynis (CISOfy).
-- Not affiliated with or endorsed by any of the above projects.
+- Not affiliated with or endorsed by any of the above projects.  
+
+### Trademarks + Logos
+All product names, logos and brands mentioned in this repository are the property of their respective owners. They are used here for identification and descriptive purposes only and do not imply any affiliation with or endorsement by their owners.

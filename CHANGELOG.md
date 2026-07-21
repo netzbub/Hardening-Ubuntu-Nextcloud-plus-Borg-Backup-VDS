@@ -1,18 +1,23 @@
----
-title: install.sh — Rev. 4 → Rev. 5 (Änderungen)
-author: netzbub & Claude
-source: Claude Cowork
-created: 2026-07-19
-description: Zurückführung des auf dem Testserver verifizierten Härtungslaufs (Batch 1–6) ins Master-Skript, plus GRUB-Flag nach der Boot-Havarie, neue phase12, auditd-Reihenfolge-Fix und CISOfy-Lynis-Repo. bash -n sauber.
-tags:
-  - server
-  - hardening
-  - install-harden
-  - rev5
-  - changelog
+# Changelog
+
+All notable changes to this project are documented here. Versions follow a SemVer-style `0.x` scheme. The detailed pre-release script-revision log (install.sh Rev. 4 → Rev. 5) is kept at the bottom for reference.
+
+## [0.1.1] - 2026-07-21
+
+### Added
+
+- ShellCheck GitHub Action (`.github/workflows/shellcheck.yml`) that lints `install.sh` on every push and pull request, plus a status badge in the READMEs.
+- additional paragraph concerning Version History inside README.md
+
+## [0.1.0] - 2026-07-21
+
+### Added
+
+- Initial public release. Includes `install.sh` (phased Ubuntu 24.04 hardening + Nextcloud stack, Rev. 5), `install.conf.example` (external, git-ignored configuration), the English and German READMEs, `Install-Guide.md`, `SCPs.md` / `SCPs.de.md` (server-control-panel comparison), `SECURITY.md`, `Handover.md`, and the GPL-3.0-or-later license.
+
 ---
 
-# install.sh — Rev. 4 → Rev. 5 (Änderungen)
+# Pre-release script revision detail — install.sh Rev. 4 → Rev. 5
 
 Basis: `2026-07-18-03-40-install.sh` (Rev. 4, in `.archiv/` gesichert).
 Neu: `2026-07-19-05.31_install.sh` (Rev. 5). `bash -n` sauber.

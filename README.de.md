@@ -6,9 +6,10 @@
   <img src="https://img.shields.io/github/last-commit/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?color=blueviolet" alt="letzter Commit">
   <img src="https://img.shields.io/github/issues/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS?color=yellow" alt="offene Issues">
   <img src="https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white" alt="Ubuntu 24.04">
+  <img src="https://github.com/netzbub/Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS/actions/workflows/shellcheck.yml/badge.svg" alt="ShellCheck">
 </p>
 
-*Ein stufenweise, nachprüfbares Rezept zum Härten und Einrichten eines einzelnen Ubuntu-24.04-VDS/VPS, der eine Nextcloud hinter Caddy betreibt, auf einer 4-TB-Platte als Off-site-Borg-Tresor für die lokalen (Mac-)Daten des Betreibers dient und seine Admin-Oberflächen ausschließlich über einen WireGuard-Tunnel erreichbar macht.*
+*Ein stufenweise installierendes `bash-script` zum Härten und Einrichten eines Ubuntu-24.04-VDS/VPS, auf dem einerseits eine Nextcloud-Instanz hinter Caddy läuft, auf einer 4-TB-Platte als Off-site-Borg-Tresor für die lokalen (Mac-)Daten des Betreibers dient und seine Admin-Oberflächen ausschließlich über einen WireGuard-Tunnel erreichbar macht.*
 
 > **Zusammenfassung:** das Skript – `install.sh` – wandelt eine Standard Ubuntu 24.04 Installation in einen gehärteten Remote Server für eine Nextcloud samt event-getriggertem Borg-Backup — eingehend überprüft mittels Lynis (Index-Score: 83), CIS-Benchmark und externer Postscans, fail2ban-Regex-Tests.
 
@@ -19,32 +20,34 @@ Dies ist ein Projekt für die eigene Infrastruktur, kein Produkt. Es dokumentier
 ---
 
 <p align="center">
-<img src="images/Rudern-zwei-de.jpg" width="40%" alt="...">  
+<img src="images/Rudern-zwei-de.jpg" width="50%" alt="...">  
 </p>
 
 
-## Inhaltsverzeichnis
+### Inhaltsverzeichnis
 
 - [Hardening-Ubuntu-Nextcloud-plus-Borg-Backup-VDS](#hardening-ubuntu-nextcloud-plus-borg-backup-vds)
-  - [Inhaltsverzeichnis](#inhaltsverzeichnis)
-  - [Zielsetzung](#zielsetzung)
-  - [Architektur und Komponenten](#architektur-und-komponenten)
-  - [Der umgesetzte Stack](#der-umgesetzte-stack)
+    - [Inhaltsverzeichnis](#inhaltsverzeichnis)
+    - [Zielsetzung](#zielsetzung)
+    - [Architektur und Komponenten](#architektur-und-komponenten)
+    - [Der umgesetzte Stack](#der-umgesetzte-stack)
   - [Nextcloud-Datenmodell: One-Way-Upload plus ein Austauschordner](#nextcloud-datenmodell-one-way-upload-plus-ein-austauschordner)
-  - [Backup: 4-TB-HDD plus Borg](#backup-4-tb-hdd-plus-borg)
-  - [Control Panels: die zwei ausgewählten](#control-panels-die-zwei-ausgewählten)
-  - [Hardening-Konzept](#hardening-konzept)
-  - [Installation: phasenweise, getestet, verifiziert](#installation-phasenweise-getestet-verifiziert)
-  - [Verzeichnisstruktur des Servers](#verzeichnisstruktur-des-servers)
-  - [Wie weit härten — und wo wir bewusst aufgehört haben](#wie-weit-härten--und-wo-wir-bewusst-aufgehört-haben)
-  - [Stand und Fahrplan](#stand-und-fahrplan)
-  - [Entstehung](#entstehung)
-  - [Lizenz](#lizenz)
-  - [Danksagung](#danksagung)
+    - [Backup: 4-TB-HDD plus Borg](#backup-4-tb-hdd-plus-borg)
+    - [Control Panels: die zwei ausgewählten](#control-panels-die-zwei-ausgewählten)
+    - [Hardening-Konzept](#hardening-konzept)
+    - [Installation: phasenweise, getestet, verifiziert](#installation-phasenweise-getestet-verifiziert)
+    - [Verzeichnisstruktur des Servers](#verzeichnisstruktur-des-servers)
+    - [Wie weit härten — und wo wir bewusst aufgehört haben](#wie-weit-härten--und-wo-wir-bewusst-aufgehört-haben)
+    - [Stand und Fahrplan](#stand-und-fahrplan)
+    - [Entstehung](#entstehung)
+    - [Versionsverlauf](#versionsverlauf)
+    - [Lizenz](#lizenz)
+    - [Danksagung](#danksagung)
+    - [Markennamen und Logos](#markennamen-und-logos)
 
 ---
 
-## Zielsetzung
+### Zielsetzung
 
 `Ubuntu 24.04` auf einem gemieteten virtuellen Server ist eine ausgezeichnete Basis, aber eine frische Installation ist weit offen: Passwort-SSH, Root-Login, keine nennenswerte Firewall-Politik, keine Angriffsdrosselung, kein Audit-Protokoll, kein Backup. Dieses Projekt schließt diese Lücke auf **reproduzierbare, nachvollziehbare** Weise und setzt eine nützliche Last obendrauf — eine private Nextcloud — ohne die tägliche Bedienbarkeit der Maschine aufzugeben.
 
@@ -55,7 +58,7 @@ Zwei Grundsätze ziehen sich durch alles:
 
 ---
 
-## Architektur und Komponenten
+### Architektur und Komponenten
 
 | Komponente | Rolle | Warum diese |
 |---|---|---|
@@ -75,7 +78,7 @@ Der gesamte Aufbau ist eine Maschine. Die 4-TB-HDD ist unter `/srv/hdd` gemounte
 
 ---
 
-## Der umgesetzte Stack
+### Der umgesetzte Stack
 
 Der Stand, den dieses Repository abbildet — das bis dahin verfolgte und auf dem Testserver tatsächlich installierte Design:
 
@@ -95,7 +98,7 @@ Eine harte Projektregel, schmerzhaft gelernt: **Der Abgleich vom lokalen Rechner
 
 ---
 
-## Backup: 4-TB-HDD plus Borg
+### Backup: 4-TB-HDD plus Borg
 
 Die 4-TB-HDD ist in erster Linie ein **Off-site-Backup-Tresor für die lokalen (Mac-Studio-)Daten des Betreibers** — das ist ihr Hauptzweck (rund 90–95 % des Backup-Volumens). Die Sicherung des Servers selbst ist der kleinere, zweitrangige Teil. Zwei Borg-Repositories liegen auf der HDD unter `/srv/hdd/backup`:
 
@@ -106,7 +109,7 @@ Backups laufen **event-getriggert, nicht nach Uhrzeit** (der Betreiber arbeitet 
 
 ---
 
-## Control Panels: die zwei ausgewählten
+### Control Panels: die zwei ausgewählten
 
 Nach der Sichtung eines Felds leichtgewichtiger Panels (vollständiger Vergleich: [SCPs.de.md](SCPs.de.md) · [SCPs.md](SCPs.md)) fiel die Wahl auf zwei sich ergänzende Werkzeuge statt eines schweren All-in-one:
 
@@ -117,7 +120,7 @@ Beide sind **ausschließlich** über den WireGuard-Tunnel erreichbar; ein frühe
 
 ---
 
-## Hardening-Konzept
+### Hardening-Konzept
 
 Überblick auf mittlerer Flughöhe, grob in der Reihenfolge, in der das Skript vorgeht:
 
@@ -138,7 +141,7 @@ Beide sind **ausschließlich** über den WireGuard-Tunnel erreichbar; ein frühe
 
 ---
 
-## Installation: phasenweise, getestet, verifiziert
+### Installation: phasenweise, getestet, verifiziert
 
 Schritt-für-Schritt-Begleitung: **[Install-Guide.md](Install-Guide.md)** (Englisch).
 
@@ -158,7 +161,7 @@ Die Verifizierung ist nicht optional und nicht selbstberichtet:
 
 ---
 
-## Verzeichnisstruktur des Servers
+### Verzeichnisstruktur des Servers
 
 Nur das, was dieses Projekt aufsetzt und konfiguriert — nicht der Ubuntu-Standardbaum:
 
@@ -207,7 +210,7 @@ Nur das, was dieses Projekt aufsetzt und konfiguriert — nicht der Ubuntu-Stand
 
 ---
 
-## Wie weit härten — und wo wir bewusst aufgehört haben
+### Wie weit härten — und wo wir bewusst aufgehört haben
 
 Härtung nützt nur, wenn die Maschine bedienbar bleibt. Mehrere bewusste *Nicht*-Härtungen sorgen dafür:
 
@@ -221,19 +224,28 @@ Diese Abweichungen sind dokumentiert, damit ein späteres Audit (oder ein zweite
 
 ---
 
-## Stand und Fahrplan
+### Stand und Fahrplan
 
 Aktueller Stand und die konkreten nächsten Aufgaben stehen im **[Handover.md](Handover.md)**. Kurz: Die einzelnen Härtungs-Bausteine sind auf einem Testserver verifiziert, aber das **zusammengesetzte `install.sh` ist noch nicht am Stück gelaufen**; der erste Produktivlauf muss phasenweise erfolgen, gefolgt vom externen Scan und dem Restore-Test.
 
 ---
 
-## Entstehung
+### Entstehung
 
 Die Idee, das Konzept und die Anforderungen habe ich entwickelt. Design,Skripting und Review sind aus enger Zusammenarbeit mit `Claude Opus 4.8` und `Claude Fable 5 – Cowork` entstanden, inklusive wiederholtem Einsatz von `zwei bis drei Subagenten` für unabhängige „Council"-Reviews des Härtungsskripts — mehrere Runden davon sind in der Änderungshistorie des Skripts selbst festgehalten. Das wiederkehrende Thema dieser Zusammenarbeit war genau der Abwägungspunkt oben: wie weit man härtet, bevor es die Bedienbarkeit kostet, und wo man sich bewusst gegen eine Maßnahme entscheidet, um mit dem Server noch arbeiten zu können.
 
 ---
 
-## Lizenz
+### Versionsverlauf
+
+| Version | Changes | Date |
+| :--- | :--- | :--- |
+| v0.1.0 | Erstveröffentlichung: install.sh, READMEs (EN/DE), Installationsanleitung, SCP-Vergleich, Sicherheitsrichtlinie, Changelog, GPL-3.0-Lizenz  | 2026.07.21 |
+| v0.1.1 |  ShellCheck-GitHub-Action (shellcheck.yml) + Badge, zusätzlicher Absatz zum Versionsverlauf in der README.md | 2026.07.21 |
+
+---
+
+### Lizenz
 
 **GNU General Public License v3.0 oder später (GPL-3.0-or-later).** Du darfst dieses Projekt nutzen, weitergeben, forken und modifizieren, sofern abgeleitete Werke unter derselben Lizenz bleiben und die ursprüngliche Quelle genannt wird. Siehe [LICENSE](LICENSE).
 
@@ -241,8 +253,13 @@ Warum GPL-3.0 und keine permissive Lizenz: Der ausdrückliche Wunsch ist Share-a
 
 ---
 
-## Danksagung
+### Danksagung
 
 - Design, Skripting, Dokumentation und Review in Teamarbeit mit **Claude Opus 4.8** und **Claude Fable 5** (Cowork), mit Multi-Agenten-Council-Reviews des Härtungsskripts.
 - Aufgebaut auf den Schultern der Upstream-Projekte: Ubuntu, Docker, Nextcloud, Caddy, WireGuard, BorgBackup, Runtipi, Cockpit, fail2ban, auditd, AIDE und Lynis (CISOfy).
 - In keiner Weise mit den genannten Projekten affiliiert oder von ihnen unterstützt.
+
+
+### Markennamen und Logos
+
+Alle in diesem Repository genannten Produktnamen, Logos und Marken sind Eigentum ihrer jeweiligen Inhaber. Sie werden ausschließlich zu Identifikations- und Beschreibungszwecken verwendet und implizieren weder eine Verbindung zu noch eine Billigung durch die jeweiligen Inhaber.
