@@ -1,0 +1,39 @@
+# install.conf.example — template for the personal, deployment-specific values.
+#
+# 1) Copy it:        cp install.conf.example install.conf
+# 2) Edit install.conf with YOUR real values.
+# 3) install.conf is git-ignored and never uploaded. Keep it next to install.sh,
+#    or point install.sh at it:  INSTALL_CONF=/path/to/install.conf ./install.sh ...
+#
+# NOTE: do not commit real secrets. Clear SMTP_PASS again after the one-time Phase 4 run.
+# All values below are placeholders (John Doe style) — replace them.
+
+# --- Required ---
+ADMIN_USER="johndoe"                 # sudo admin user / SSH login
+SSH_PORT="22022"                     # non-standard SSH port
+SSH_PUBKEY="ssh-ed25519 AAAA...replace-with-your-public-key... johndoe-vps"
+ADMIN_MAIL="admin@example.com"       # valid address for system mail
+HOSTNAME_FQDN="server.example.com"   # optional; leave empty to keep the provider hostname
+
+# --- Nextcloud ---
+NC_DOMAIN="next.example.com"
+NC_IMAGE_TAG=""                      # current stable tag, e.g. "31" (WITHOUT the -apache suffix)
+
+# --- WireGuard ---
+WG_PORT="51820"
+WG_NET="10.8.0"                      # /24 appended; server = .1, local machine = .2
+WG_CLIENT_PUBKEY=""                  # your local machine's WireGuard public key
+
+# --- Mail (msmtp) ---
+SMTP_HOST="mail.example.com"
+SMTP_PORT="587"
+SMTP_USER="admin@example.com"        # often the full address
+SMTP_PASS=""                         # ONE-TIME only; clear again after Phase 4
+SMTP_FROM="admin@example.com"
+
+# --- Optional overrides (defaults shown; uncomment to change) ---
+# RUNTIPI_DIR="/opt/runtipi"
+# HDD_MOUNT="/srv/hdd"
+# TIMEZONE="Europe/Berlin"
+# WAN_IF=""                          # empty = auto-detect the WAN interface
+# ENABLE_GRUB_HARDENING="no"         # "yes" only with a fresh provider backup

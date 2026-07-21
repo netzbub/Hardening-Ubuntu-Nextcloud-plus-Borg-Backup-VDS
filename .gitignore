@@ -1,0 +1,16 @@
+# Exclude sourcemaps
+*.map
+
+# Exclude macOS Finder (System Explorer) View States
+.DS_Store
+
+# Exclude files
+CLAUDE.md
+ 
+# VS Code Local History extension
+.history/
+.archive/
+# Personal, non-public config for install.sh
+install.conf
+# Personal, non-public SCP-comparison
+SCPs-org.md
