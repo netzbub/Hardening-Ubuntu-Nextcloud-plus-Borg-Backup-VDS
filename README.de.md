@@ -68,7 +68,7 @@ Zwei Grundsätze ziehen sich durch alles:
 | **Caddy** (nativ, nicht containerisiert) | Reverse-Proxy + automatisches TLS | Terminiert HTTPS für `next.<domain>`, automatisches Let's Encrypt |
 | **WireGuard** | Admin-VPN | Der einzige Weg zu den Admin-Panels; hält sie aus dem offenen Netz |
 | **Borg** | Deduplizierendes Backup | Server-Selbstsicherung + Off-site-Kopie des lokalen Rechners, beide auf der 4-TB-HDD |
-| **Runtipi** | App-Store-Panel | Ein-Klick-Docker-Apps, nur über WireGuard erreichbar |
+| **Portainer CE** | Container-Verwaltungs-Panel | Docker-Deploy + Monitoring, kein eigener Proxy, nur über WireGuard erreichbar |
 | **Cockpit** | Host-Überwachung/-Steuerung | Logs, Storage, Dienste; socket-aktiviert, WireGuard-only |
 | **ufw + nftables** | Firewall | Default-Deny; eine `DOCKER-USER`-Regel schließt Dockers bekannten ufw-Bypass |
 | **fail2ban** | Angriffsdrosselung | Bannt SSH- und Nextcloud-Brute-Force, IPv6 als `/64`-Präfix |
@@ -85,7 +85,7 @@ Der Stand, den dieses Repository abbildet — das bis dahin verfolgte und auf de
 - **Nextcloud** als Docker-Compose-Stack: `app` + `db` (MariaDB) + `redis` + `cron`, Datenverzeichnis auf der 4-TB-HDD, Admin-Konto beim Erststart unbeaufsichtigt angelegt, TOTP-Zwei-Faktor **erzwungen**.
 - **Caddy** nativ auf dem Host als öffentlicher Reverse-Proxy für `next.<domain>` (`127.0.0.1:8080` → HTTPS), mit automatischen Zertifikaten hinter einem DNS-Gate, damit ein falscher Eintrag nicht das Let's-Encrypt-Ratelimit verbrennt.
 - **Docker** auf Daemon-Ebene gehärtet (`no-new-privileges`, `userland-proxy: false`, IPv6 aus) und hinter einer `DOCKER-USER`-Firewallregel, die verhindert, dass veröffentlichte Container-Ports die ufw umgehen.
-- **WireGuard** als einziger Weg zu **Runtipi** (`10.8.0.1:8090`) und **Cockpit** (`10.8.0.1:9090`); beide per externem Scan nachweislich aus dem öffentlichen Internet dicht.
+- **WireGuard** als einziger Weg zu **Portainer CE** (`10.8.0.1:9443`) und **Cockpit** (`10.8.0.1:9090`); beide per externem Scan nachweislich aus dem öffentlichen Internet dicht.
 
 ---
 
@@ -107,16 +107,18 @@ Die 4-TB-HDD ist in erster Linie ein **Off-site-Backup-Tresor für die lokalen (
 
 Backups laufen **event-getriggert, nicht nach Uhrzeit** (der Betreiber arbeitet nachts): Nach dem Push des lokalen Rechners legt dieser eine Trigger-Datei ab, eine systemd-Path-Unit stößt die Server-Selbstsicherung an, und ein wöchentlicher Timer ist das Auffangnetz. Bewusst **kein Zweitprovider / keine StorageBox**: Für die Mac-Daten *ist* der Server selbst die Off-site-Kopie (`repo-local`), und lokal existieren drei weitere Backups. Das akzeptierte Restrisiko (gleichzeitiger Verlust von Büro und Server) ist dokumentiert und bewusst getragen.
 
+**Speicher-Puffer auf dem Datenvolume.** Nextclouds Blobs und die Borg-Repositories teilen sich `$HDD_MOUNT`; ein ext4-Reserved-Blocks-Wert (`tune2fs -m 5`) hält die letzten 5 % für normale Schreibprozesse gesperrt, und ein zweimal täglicher Timer mailt eine Warnung bei 85 % und einen kritischen Alarm bei 95 %. Beides ist prozentual gegen das jeweils gemountete Gerät gerechnet — kein Code-Unterschied zwischen der Übergangs-NVMe#2 mit 500 GB und der späteren 4-TB-HDD.
+
 ---
 
 ### Control Panels: die zwei ausgewählten
 
 Nach der Sichtung eines Felds leichtgewichtiger Panels (vollständiger Vergleich: [SCPs.de.md](SCPs.de.md) · [SCPs.md](SCPs.md)) fiel die Wahl auf zwei sich ergänzende Werkzeuge statt eines schweren All-in-one:
 
-- **Runtipi** — ein App-Store für Ein-Klick-Docker-Apps. Sein eigener Proxy wird von `80/443` auf `8090/8445` verlegt und an die WireGuard-Adresse gebunden.
+- **Portainer CE** — Docker-Deploy und -Monitoring. Braucht weder `80` noch `443`, bringt keinen eigenen Proxy mit, bindet direkt an die WireGuard-Adresse. Deploy-Vorlagen, kein gepflegter App-Store — Updates der laufenden Container werden selbst gefahren.
 - **Cockpit** — Überwachung und Steuerung auf Host-Ebene (Logs, Storage, Dienste), socket-aktiviert, kostet im Leerlauf also fast nichts.
 
-Beide sind **ausschließlich** über den WireGuard-Tunnel erreichbar; ein früherer Kandidat (Dockge) wurde verworfen. Nextcloud selbst ist bewusst der einzige öffentliche Dienst.
+Beide sind **ausschließlich** über den WireGuard-Tunnel erreichbar; frühere Kandidaten (Dockge, Runtipi, Dokploy, Coolify, CasaOS, Cosmos) wurden verworfen — Runtipi konkret, weil es einen eigenen Proxy mitbringt, `80`/`443`-nahe Ports braucht und einen zweiten Docker-Socket-Halter hinzufügt, ohne gegenüber Portainers reinen Deploy-Vorlagen gepflegte Apps zu bieten. Nextcloud selbst ist bewusst der einzige öffentliche Dienst.
 
 ---
 
@@ -135,7 +137,7 @@ Beide sind **ausschließlich** über den WireGuard-Tunnel erreichbar; ein frühe
 - **WireGuard** — Server-Schlüsselpaar + PresharedKey; die Admin-Panels leben dahinter.
 - **Docker + Caddy + Nextcloud** — gehärteter Daemon, sandboxed Caddy-Dienst, mem/PID- Limits pro Dienst, DNS-Gate vor TLS-Ausstellung, erzwungene Nextcloud-2FA.
 - **Borg-Backup** — append-only-Key für den lokalen Rechner, Event-Trigger, Fehleralarm.
-- **Admin-Panels** — Cockpit + Runtipi, WireGuard-only.
+- **Admin-Panels** — Cockpit + Portainer CE, WireGuard-only.
 - **Dienste-Bereinigung + AIDE** — unnötige VM-Gast-Dienste deaktivieren, das cloud-init-`ubuntu`-Konto entfernen, die AIDE-Integritätsbasis erstellen.
 - **Erreichbarkeit für den Betreiber** — der öffentliche Weg ist Nextcloud über HTTPS; alles Administrative erreicht man über den **WireGuard-Tunnel** (und, für einen einzelnen weitergeleiteten Dienst-Port, einen **SSH-`-L`-Tunnel** obendrauf).
 
@@ -153,7 +155,7 @@ Das Skript läuft in nummerierten Phasen und lässt sich auf drei Arten fahren:
 
 Die Verifizierung ist nicht optional und nicht selbstberichtet:
 
-- externes `nmap -Pn` **und** `nmap -6 -Pn` gegen `8090/8445/9090` — sie müssen aus dem öffentlichen Internet gefiltert sein;
+- externes `nmap -Pn` **und** `nmap -6 -Pn` gegen `9443/9090` — sie müssen aus dem öffentlichen Internet gefiltert sein;
 - `verify`-Health-Check (effektive SSH-Konfig via `sshd -T`, Firewall, fail2ban, auditd, AppArmor, Mounts, Dienste);
 - `fail2ban-regex` gegen **echte** Nextcloud-Fehllogin-Zeilen;
 - ein tatsächlicher Borg-**Restore** (`borg extract`), bevor dem Backup vertraut wird;
@@ -179,8 +181,6 @@ Nur das, was dieses Projekt aufsetzt und konfiguriert — nicht der Ubuntu-Stand
         ├── repo-server/             # Borg: Server-Selbstsicherung
         ├── repo-local/              # Borg: lokaler Rechner → Server (append-only)
         └── trigger/                 # Event-Trigger fürs Server-Backup
-
-/opt/runtipi/                        # Runtipi App-Store (WireGuard-only)
 
 /etc/
 ├── ssh/sshd_config.d/10-hardening.conf
@@ -242,6 +242,8 @@ Die Idee, das Konzept und die Anforderungen habe ich entwickelt. Design,Skriptin
 | :--- | :--- | :--- |
 | v0.1.0 | Erstveröffentlichung: install.sh, READMEs (EN/DE), Installationsanleitung, SCP-Vergleich, Sicherheitsrichtlinie, Changelog, GPL-3.0-Lizenz  | 2026.07.21 |
 | v0.1.1 |  ShellCheck-GitHub-Action (shellcheck.yml) + Badge, zusätzlicher Absatz zum Versionsverlauf in der README.md | 2026.07.21 |
+| v0.2.0 | Panel-Entscheidung: Portainer CE ersetzt Runtipi (Phase 11) nach Vergleich gegen Dokploy, Coolify, CasaOS und Cosmos anhand von vier Kriterien; Phase-3-Abbruchfehler behoben (`set -e` beendete die Phase, sobald der SSH-Alt-Port-Zweig nicht griff); Multi-Agenten-Review (Security/Robustheit/Stil) von install.sh eingearbeitet | 2026.08.01 |
+| v0.3.0 | Speicher-Puffer auf `$HDD_MOUNT`: ext4-5%-Reserved-Blocks plus zweimal täglicher 85%/95%-Mail-Alarm (`disk-space-alert.sh`/`.timer`), prozentual gerechnet, läuft unverändert über die Übergangs-NVMe#2 und die spätere 4-TB-HDD hinweg; zwei neue `verify`-Checks; AIDE-Excludes und Doku aktualisiert | 2026.08.01 |
 
 ---
 
@@ -256,7 +258,7 @@ Warum GPL-3.0 und keine permissive Lizenz: Der ausdrückliche Wunsch ist Share-a
 ### Danksagung
 
 - Design, Skripting, Dokumentation und Review in Teamarbeit mit **Claude Opus 4.8** und **Claude Fable 5** (Cowork), mit Multi-Agenten-Council-Reviews des Härtungsskripts.
-- Aufgebaut auf den Schultern der Upstream-Projekte: Ubuntu, Docker, Nextcloud, Caddy, WireGuard, BorgBackup, Runtipi, Cockpit, fail2ban, auditd, AIDE und Lynis (CISOfy).
+- Aufgebaut auf den Schultern der Upstream-Projekte: Ubuntu, Docker, Nextcloud, Caddy, WireGuard, BorgBackup, Portainer, Cockpit, fail2ban, auditd, AIDE und Lynis (CISOfy).
 - In keiner Weise mit den genannten Projekten affiliiert oder von ihnen unterstützt.
 
 

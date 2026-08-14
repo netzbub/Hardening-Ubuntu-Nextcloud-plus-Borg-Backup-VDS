@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here. Versions follow a SemVer-style `0.x` scheme. The detailed pre-release script-revision log (install.sh Rev. 4 → Rev. 5) is kept at the bottom for reference.
 
+## [0.3.0] - 2026-08-01
+
+### Added
+
+- **Disk-space headroom on `$HDD_MOUNT`** (phase 9): explicit `tune2fs -m 5` reserved-blocks setting keeps the last 5 % off-limits to normal writers (the NC container's mapped uid, Borg over SSH), so uploads/backups hit `ENOSPC` at 95 % instead of running the volume bit-for-bit full. Percentage-based, so it works unchanged whether `$HDD_MOUNT` is the transitional second 500 GB NVMe or, from month 5, the 4 TB HDD.
+- **`disk-space-alert.sh`** + `disk-space-alert.timer` (twice daily): mails a warning at 85 % and a critical alert at 95 % for both `$HDD_MOUNT` and `/`, via the existing msmtp setup. A per-mount state file avoids re-mailing on every tick — only on a newly crossed threshold.
+- `verify` extended with two checks: ext4 reserved-blocks percentage on `$HDD_MOUNT` (4–6 % tolerance), `disk-space-alert.timer` active.
+- AIDE excludes extended with `/var/lib/disk-space-alert` (the alert script's state file changes constantly and would otherwise flag as a false integrity finding).
+- Manual HDD setup comment (phase 9) and `Install-Guide.md` §1.8 updated to mention the reserved-blocks step; both READMEs get a short paragraph on the new headroom/alerting.
+
+## [0.2.0] - 2026-08-01
+
+### Changed
+
+- Phase 11 now installs **Portainer CE** instead of Runtipi, following a four-criteria comparison (app store, real Docker deploy, real monitoring, compatible with the hardened setup) against Dokploy, Coolify, CasaOS and Cosmos — full comparison in `SCPs.md` / `SCPs.de.md`. Portainer needs neither `80` nor `443`, ships no proxy of its own, and binds directly to `${WG_NET}.1:9443`.
+- AIDE excludes, the monthly update-reminder cron text, `verify`'s panel-port check, and both READMEs updated from Runtipi/8090/8445 to Portainer/9443.
+
+### Fixed
+
+- **Phase 3 abort bug:** `[[ "$KEEP22" == 1 ]] && ufw limit 22/tcp ...` as a bare statement returned exit code 1 under `set -e` whenever `KEEP22=0` (the normal case, SSH already listening on the hardened port), killing phase 3 right after the SSH ufw rule was set. Wrapped in an `if` block; `KEEP22` is now `local` to `phase3()`.
+
+### Notes
+
+- These changes were folded back after a three-agent independent review (security, idempotency/robustness, shell style) of the full `install.sh`. No other findings from that review have been acted on yet — see `Handover.md` for the open list.
+
 ## [0.1.1] - 2026-07-21
 
 ### Added

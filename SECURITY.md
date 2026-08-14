@@ -29,7 +29,7 @@ a fix is available, coordinated disclosure is appreciated.
 ## Out of scope
 
 - Issues in the upstream projects themselves (Ubuntu, Docker, Nextcloud, Caddy, WireGuard,
-  Borg, Runtipi, Cockpit, fail2ban, …) — please report those to the respective projects.
+  Borg, Portainer, Cockpit, fail2ban, …) — please report those to the respective projects.
 - The documented, deliberate trade-offs (see the "How far to harden" section of the
   README), which are conscious decisions rather than oversights.
 - Anything that requires an attacker to already have root on the host.

@@ -12,5 +12,6 @@ CLAUDE.md
 .archive/
 # Personal, non-public config for install.sh
 install.conf
-# Personal, non-public SCP-comparison
-SCPs-org.md
+
+# Exclude personal, non-public notes
+Handover.md
