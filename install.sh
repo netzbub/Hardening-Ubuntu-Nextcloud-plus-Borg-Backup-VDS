@@ -6,7 +6,8 @@
 #          phase-11 lockdown, auditd, container hardening, etc.)
 # Rev. 4 (2026-07-12) - council must-fixes integrated:
 #          1 Redis cap_add (start blocker), 2 Runtipi path /opt/runtipi (blocker;
-#          settings.json schema verified against runtipi.io docs as of 2026-04),
+#          settings.json schema verified against runtipi.io docs as of 2026-04) -
+#          Runtipi itself was replaced by Portainer CE in Rev. 6, see below,
 #          3 fstab nofail + docker RequiresMountsFor, 4 password-offline gate,
 #          5 DOCKER-USER also IPv6 (after6.rules) + Docker IPv6 explicitly off,
 #          6 NC 2FA enforcement (nc-post-setup.sh), 7 fail2ban /64 ban (ipset),
@@ -28,6 +29,21 @@
 #          - extra SSH directives (Ciphers/Kex/MACs, HostbasedAuth/IgnoreRhosts); S.1.f
 #            PermitRootLogin cleanup in the main sshd_config.
 #          - Lynis from the CISOfy repo (phase 4) instead of the frozen universe package.
+# Rev. 6 (2026-08-01) - panel decision + multi-agent review fixes folded back:
+#          - Panel research (four criteria: app store, real Docker deploy, real
+#            monitoring, compatible with the hardened setup) concluded Runtipi does
+#            not fit; phase 11 now installs Portainer CE instead (own docker run,
+#            no bundled proxy, binds directly to the WG address, no port 80/443 clash).
+#          - AIDE excludes and the monthly update-reminder text updated accordingly.
+#          - Fixed a real phase-3 abort bug: '[[ "$KEEP22" == 1 ]] && ufw limit 22/tcp ...'
+#            as a bare statement returned exit 1 under 'set -e' whenever KEEP22=0 (the
+#            normal case), killing phase3 right after the SSH rule. Now wrapped in 'if'.
+#            KEEP22 is now local to phase3().
+#          - Disk-space headroom on $HDD_MOUNT: explicit 'tune2fs -m 5' reserved-blocks
+#            plus a twice-daily disk-space-alert timer (85%/95% mail thresholds).
+#            Percentage-based - unchanged whether $HDD_MOUNT is the transitional second
+#            500 GB NVMe or, from month 5, the 4 TB HDD. Two new verify checks; AIDE
+#            excludes extended for the alert script's state directory.
 #
 # USAGE (as root on a fresh Ubuntu 24.04):
 #   ./install.sh preflight        # checks + apt update/upgrade
@@ -40,7 +56,7 @@
 #
 # 3-STEP ROUTINE (after the prerequisites are front-loaded: DNS, HDD, WG pubkey,
 # NC tag, SMTP, SSH pubkey): 'bootstrap' -> test the login in a 2nd terminal -> 'rest'.
-# FIRST RUN on a new server still phase by phase (catch Redis/Runtipi live).
+# FIRST RUN on a new server still phase by phase (catch Redis/Portainer live).
 #
 # RECOMMENDATION: run phases individually; after phase2 (SSH) you MUST test the
 # login in a SECOND terminal before closing the old session!
@@ -91,8 +107,8 @@ SMTP_USER="${SMTP_USER:-}"                 # SMTP login (often the full address)
 SMTP_PASS="${SMTP_PASS:-}"                 # only for a ONE-TIME write to /etc/msmtp-pass (600); then clear it again
 SMTP_FROM="${SMTP_FROM:-}"                 # sender address
 
-# --- Runtipi (phase 11) ---
-RUNTIPI_DIR="${RUNTIPI_DIR:-/opt/runtipi}"
+# --- Portainer (phase 11) ---
+PORTAINER_PORT="${PORTAINER_PORT:-9443}"
 
 # --- HDD / Borg backup on the server HDD (phase 9+10) ---
 HDD_MOUNT="${HDD_MOUNT:-/srv/hdd}"         # 4 TB HDD mount point
@@ -285,6 +301,7 @@ phase3() {
     require_root
     log "Phase 3: ufw"
     # Guard against out-of-order runs (Review M8): is sshd listening on $SSH_PORT?
+    local KEEP22
     if ! ss -tln 2>/dev/null | grep -q ":${SSH_PORT} "; then
         warn "sshd is NOT listening on $SSH_PORT (phase2 missing?) - port 22 stays open too."
         KEEP22=1
@@ -295,7 +312,9 @@ phase3() {
     ufw default deny incoming
     ufw default allow outgoing
     ufw limit "${SSH_PORT}/tcp" comment 'SSH rate-limited'
-    [[ "$KEEP22" == 1 ]] && ufw limit 22/tcp comment 'SSH alt port - remove after phase2!'
+    if [[ "$KEEP22" == 1 ]]; then
+        ufw limit 22/tcp comment 'SSH alt port - remove after phase2!'
+    fi
     ufw allow 80/tcp  comment 'HTTP ACME+Redirect'
     ufw allow 443/tcp comment 'HTTPS'
     ufw logging low
@@ -860,7 +879,7 @@ EOF
     # === CRITICAL (Review K1): Docker bypasses ufw entirely ===
     # Docker writes its own iptables rules into the FORWARD/DOCKER chains that run BEFORE
     # all ufw hooks. 'ufw deny incoming' does NOT protect published container ports.
-    # Without this block, Runtipi 8090/8445 (phase 11) would be open despite ufw.
+    # Without this block, Portainer 9443 (phase 11) would be open despite ufw.
     # Fix: in the DOCKER-USER chain (which Docker honours) drop all NEW inbound from the
     # WAN interface. Loopback (NC 127.0.0.1), wg0 (tunnel) and container-to-
     # container traffic (Docker bridges) stay untouched.
@@ -990,6 +1009,7 @@ EOF
     # NC from starting against an empty directory:
     #   parted /dev/sdb mklabel gpt && parted /dev/sdb mkpart primary ext4 0% 100%
     #   mkfs.ext4 /dev/sdb1
+    #   tune2fs -m 5 /dev/sdb1   # explicit 5% root-reserve (re-asserted below too, idempotent)
     #   UUID=$(blkid -s UUID -o value /dev/sdb1)
     #   echo "UUID=$UUID $HDD_MOUNT ext4 defaults,nosuid,nodev,nofail,x-systemd.device-timeout=30 0 2" >> /etc/fstab
     #   systemctl daemon-reload && mount "$HDD_MOUNT"
@@ -998,6 +1018,84 @@ EOF
         warn "HDD is NOT mounted at $HDD_MOUNT - NC data would land on the NVMe!"
         warn "Set up the HDD first (see the comment in phase 9), then start the stack."
     fi
+
+    # --- Space headroom on $HDD_MOUNT (Handover: NC uploads + Borg repos share this volume) ---
+    # Percentage-based, so this is identical whether $HDD_MOUNT is currently the transitional
+    # second 500 GB NVMe or, from month 5, the 4 TB HDD - no branch, no size constant.
+    # ext4 already reserves blocks for root by default; re-assert 5% explicitly so a normal
+    # writer (the NC container's mapped uid, Borg over SSH) hits ENOSPC at 95% instead of
+    # silently running the volume bit-for-bit full.
+    if mountpoint -q "$HDD_MOUNT"; then
+        hdd_dev="$(findmnt -no SOURCE "$HDD_MOUNT" 2>/dev/null || true)"
+        hdd_fstype="$(findmnt -no FSTYPE "$HDD_MOUNT" 2>/dev/null || true)"
+        if [[ -n "$hdd_dev" && "$hdd_fstype" == "ext4" ]]; then
+            tune2fs -m 5 "$hdd_dev" || warn "tune2fs -m 5 on $hdd_dev failed - check manually."
+        else
+            warn "$HDD_MOUNT is not ext4 (fstype: ${hdd_fstype:-unknown}) - reserved-blocks headroom NOT applied, check manually."
+        fi
+    else
+        warn "$HDD_MOUNT not mounted yet - reserved-blocks headroom skipped, re-run phase9 after mounting the volume."
+    fi
+
+    # --- Early-warning disk-space alert (before the 5% reserve hard-stops writes) ---
+    # Two thresholds, mailed via the existing msmtp setup; a state file avoids re-mailing
+    # on every timer tick once a threshold is already reported. Watches both $HDD_MOUNT
+    # (NC data + Borg repos) and / (system, DB, container images) - same script either way.
+    cat > /usr/local/bin/disk-space-alert.sh <<'DSEOF'
+#!/bin/bash
+# Warn at 85%, critical at 95% (matches the ext4 5% root-reserve) - one mail per
+# newly-crossed threshold, not one per timer run. Usage: disk-space-alert.sh <mount> [<mount> ...]
+set -euo pipefail
+WARN=85
+CRIT=95
+STATE_DIR=/var/lib/disk-space-alert
+install -d "$STATE_DIR"
+
+for mnt in "$@"; do
+    [[ -d "$mnt" ]] || continue
+    state_file="$STATE_DIR/$(systemd-escape -p "$mnt").state"
+    use=$(df -P "$mnt" 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5}')
+    [[ -n "$use" ]] || continue
+    last=0
+    [[ -f "$state_file" ]] && last=$(cat "$state_file")
+
+    level=0
+    if   (( use >= CRIT )); then level=2
+    elif (( use >= WARN )); then level=1
+    fi
+
+    if (( level > 0 && level != last )); then
+        label="warning (>= ${WARN}%)"
+        (( level == 2 )) && label="CRITICAL (>= ${CRIT}%)"
+        { echo "Mountpoint $mnt is at ${use}% - $label."; echo; df -h "$mnt"; } \
+            | mail -s "Disk space $label: $mnt at ${use}% on $(hostname)" root 2>/dev/null || true
+    fi
+    echo "$level" > "$state_file"
+done
+DSEOF
+    chmod 750 /usr/local/bin/disk-space-alert.sh
+
+    cat > /etc/systemd/system/disk-space-alert.service <<EOF
+[Unit]
+Description=Disk space threshold alert (${HDD_MOUNT} and /)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/disk-space-alert.sh ${HDD_MOUNT} /
+EOF
+    cat > /etc/systemd/system/disk-space-alert.timer <<'EOF'
+[Unit]
+Description=Run disk-space-alert twice daily
+
+[Timer]
+OnCalendar=*-*-* 06,18:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now disk-space-alert.timer
     install -d -m 750 "$NCDATA_DIR"   # 750 instead of default 755 (Review M4): no world-read
     chown 33:33 "$NCDATA_DIR"         # www-data in the NC container
 
@@ -1128,7 +1226,7 @@ EOF
     # a human must trigger NC/container updates (Review M1). Cron mails a reminder.
     cat > /etc/cron.monthly/container-update-reminder <<'EOF'
 #!/bin/sh
-echo "Check container updates: NC tag on hub.docker.com/_/nextcloud, Runtipi apps, then per stack 'docker compose pull && up -d'. Then occ upgrade if needed." \
+echo "Check container updates: NC tag on hub.docker.com/_/nextcloud, Portainer image, then per stack 'docker compose pull && up -d'. Then occ upgrade if needed." \
   | mail -s "Reminder: container/app updates on $(hostname)" root 2>/dev/null || true
 EOF
     chmod 700 /etc/cron.monthly/container-update-reminder
@@ -1301,7 +1399,7 @@ EOF
 # ================== PHASE 11: ADMIN PANELS (WIREGUARD ONLY) ==================
 phase11() {
     require_root
-    log "Phase 11: Cockpit + Runtipi (reachable via WireGuard only)"
+    log "Phase 11: Cockpit + Portainer CE (reachable via WireGuard only)"
     wg show wg0 &>/dev/null || die "WireGuard (phase8) must be running - panels are exposed ONLY over the tunnel."
 
     # Cockpit: socket-activated, uses practically nothing without an open session.
@@ -1320,63 +1418,29 @@ EOF
     systemctl restart cockpit.socket
     ufw allow in on wg0 to any port 9090 proto tcp comment 'Cockpit via WireGuard'
 
-    # Runtipi: app store + container management. Ships its own proxy (traefik) -
-    # moved from 80/443 to 8090/8445; additionally (best effort) bound to the WG address.
+    # Portainer CE: Docker deploy + monitoring, no App Store, no proxy of its own.
+    # Needs neither 80 nor 443, binds directly to the WG address. Deploy vorlagen only -
+    # updates of deployed apps are run by hand, unlike a maintained app store.
     # Public isolation is primarily done by the DOCKER-USER rule (phase 9),
     # ufw + binding are defense-in-depth. The UI is never public.
     if command -v docker &>/dev/null; then
-        if [[ ! -f "$RUNTIPI_DIR/.installed-by-hardening" ]]; then
-            # H1 (logic+final review): guarantee Caddy is restarted, EVEN on a set -e abort
-            # mid-block. A RETURN trap would NOT fire -> EXIT trap, cleared on success.
-            trap 'systemctl start caddy 2>/dev/null || true' EXIT
-            systemctl stop caddy    # avoid a port-80 collision on the first Runtipi start
-
-            # H1 (security): do NOT blindly pipe the installer. Download, store, then run as
-            # a file (traceable/auditable). No 'curl | bash' as root.
-            install -d /root/runtipi-install
-            curl -fsSL https://setup.runtipi.io -o /root/runtipi-install/setup.sh \
-                || die "Runtipi installer not downloadable - check network/URL."
-            warn "Runtipi installer is in /root/runtipi-install/setup.sh - review it once before production use."
-            # Council-Fix 2 (VERIFIED against the runtipi install.sh 2026-07-12): the installer does
-            # 'mkdir -p runtipi && cd runtipi' RELATIVE TO THE CWD and starts Runtipi at the end
-            # immediately ('sudo ./runtipi-cli start' - Caddy is stopped above, 80/443 free).
-            # So: install from a defined $(dirname $RUNTIPI_DIR).
-            install -d "$(dirname "$RUNTIPI_DIR")"
-            ( cd "$(dirname "$RUNTIPI_DIR")" && bash /root/runtipi-install/setup.sh ) \
-                || die "Runtipi installer failed - check the output above. (Caddy restarts via the trap.)"
-            [[ -x "$RUNTIPI_DIR/runtipi-cli" ]] || die "Runtipi CLI missing under $RUNTIPI_DIR - check the install path."
-
-            ( cd "$RUNTIPI_DIR" && ./runtipi-cli stop ) || true
-            # Move ports + bind. Schema VERIFIED (runtipi.io/docs/guides/custom-settings,
-            # as of 2026-04): state/settings.json relative to the install dir;
-            # keys 'port' (int), 'sslPort' (int), 'listenIp' (string) exist exactly like this.
-            install -d "$RUNTIPI_DIR/state"
-            WG_BIND="${WG_NET}.1" RUNTIPI_DIR="$RUNTIPI_DIR" python3 - <<'PY'
-import json, os, pathlib
-p = pathlib.Path(os.environ['RUNTIPI_DIR']) / 'state' / 'settings.json'
-s = json.loads(p.read_text()) if p.exists() and p.read_text().strip() else {}
-s['port'] = 8090
-s['sslPort'] = 8445
-s['listenIp'] = os.environ['WG_BIND']
-p.write_text(json.dumps(s, indent=2))
-PY
-            ( cd "$RUNTIPI_DIR" && ./runtipi-cli start ) \
-                || die "runtipi-cli start failed - check $RUNTIPI_DIR. (Caddy restarts via the trap.)"
-            systemctl start caddy
-            trap - EXIT   # success path: remove the EXIT trap again
-            touch "$RUNTIPI_DIR/.installed-by-hardening"   # idempotency marker (Review H1)
+        if ! docker ps -a --format '{{.Names}}' | grep -qx portainer; then
+            docker volume create portainer_data >/dev/null
+            docker run -d --name portainer --restart=always \
+                -p "${WG_NET}.1:${PORTAINER_PORT}:9443" \
+                -v /var/run/docker.sock:/var/run/docker.sock \
+                -v portainer_data:/data \
+                portainer/portainer-ce:lts \
+                || die "Portainer container failed to start - check 'docker logs portainer'."
         fi
-        ufw allow in on wg0 to any port 8090 proto tcp comment 'Runtipi via WireGuard'
-        ufw allow in on wg0 to any port 8445 proto tcp comment 'Runtipi TLS via WireGuard'
+        ufw allow in on wg0 to any port "$PORTAINER_PORT" proto tcp comment 'Portainer via WireGuard'
     else
-        warn "Docker missing (phase9) - Runtipi skipped."
+        warn "Docker missing (phase9) - Portainer skipped."
     fi
-    log "Phase 11 done. In the tunnel:  Cockpit https://${WG_NET}.1:9090  |  Runtipi http://${WG_NET}.1:8090"
-    warn "REQUIRED after 'all': check from OUTSIDE (a foreign network) that 8090/8445/9090 are closed -"
-    warn "    nmap -Pn <server-ipv4> -p 8090,8445,9090   UND   nmap -6 -Pn <server-ipv6> -p 8090,8445,9090"
+    log "Phase 11 done. In the tunnel:  Cockpit https://${WG_NET}.1:9090  |  Portainer https://${WG_NET}.1:${PORTAINER_PORT}"
+    warn "REQUIRED after 'all': check from OUTSIDE (a foreign network) that ${PORTAINER_PORT}/9090 are closed -"
+    warn "    nmap -Pn <server-ipv4> -p ${PORTAINER_PORT},9090   UND   nmap -6 -Pn <server-ipv6> -p ${PORTAINER_PORT},9090"
     warn "(Council-Fix 5: scan v6 separately - a v4 scan does not see an IPv6 hole; ss does not see the iptables exposure.)"
-    warn "If Runtipi is not listening on 8090: check $RUNTIPI_DIR/state/settings.json against the current docs (runtipi.io/docs/guides/custom-settings), then in $RUNTIPI_DIR: ./runtipi-cli restart."
-    warn "Publicly reachable Runtipi apps each get a Caddy entry -> reverse_proxy 127.0.0.1:8090."
 }
 
 # ============= PHASE 12: SERVICE CLEANUP + ubuntu USER + AIDE ================
@@ -1416,8 +1480,8 @@ phase12() {
     # === AIDE (file integrity) with container/data excludes (S.1.d) ===
     apt-get install -y -q aide aide-common
     install -d /etc/aide/aide.conf.d
-    printf '!/var/lib/docker\n!/var/lib/containerd\n!%s\n!%s\n!/srv/nextcloud/html\n!/srv/nextcloud/db\n!/proc\n!/sys\n!/run\n' \
-        "$HDD_MOUNT" "$RUNTIPI_DIR" > /etc/aide/aide.conf.d/99_local_excludes
+    printf '!/var/lib/docker\n!/var/lib/containerd\n!%s\n!/srv/nextcloud/html\n!/srv/nextcloud/db\n!/var/lib/disk-space-alert\n!/proc\n!/sys\n!/run\n' \
+        "$HDD_MOUNT" > /etc/aide/aide.conf.d/99_local_excludes
     cat > /etc/aide/aide.conf.d/99_local_audittools <<'EOF'
 /usr/sbin/auditctl   p+i+n+u+g+s+b+acl+xattrs+sha512
 /usr/sbin/auditd     p+i+n+u+g+s+b+acl+xattrs+sha512
@@ -1466,10 +1530,12 @@ verify() {
     chk "NC 2FA helper present"            "test -x /usr/local/bin/nc-post-setup.sh"
     chk "Caddy running"                    "systemctl is-active caddy"
     chk "Cockpit socket active"            "systemctl is-active cockpit.socket"
-    # Runtipi/traefik needs seconds to bind after start - retry instead of a false MISSING (Review M5).
+    # Portainer needs a moment to bind after start - retry instead of a false MISSING (Review M5).
     # SUBSHELL (...) - otherwise 'exit' via eval would end the whole verify (final review HIGH):
-    chk "Runtipi listens on 8090"          "( for i in 1 2 3 4 5 6; do ss -tln | grep -q ':8090 ' && exit 0; sleep 5; done; exit 1 )"
+    chk "Portainer listens on ${PORTAINER_PORT}" "( for i in 1 2 3 4 5 6; do ss -tln | grep -q \":${PORTAINER_PORT} \" && exit 0; sleep 5; done; exit 1 )"
     chk "HDD mounted ($HDD_MOUNT)"         "mountpoint -q $HDD_MOUNT"
+    chk "HDD ext4 reserved blocks ~5%"     "( d=\$(findmnt -no SOURCE $HDD_MOUNT 2>/dev/null) && [[ -n \"\$d\" ]] && p=\$(tune2fs -l \"\$d\" 2>/dev/null | awk '/Reserved block count/{r=\$4} /Block count:/{b=\$3} END{if(b>0) printf \"%d\", (r*100/b)}') && [[ \"\$p\" -ge 4 && \"\$p\" -le 6 ]] )"
+    chk "Disk-space-alert timer active"    "systemctl is-active disk-space-alert.timer"
     chk "Borg path trigger active"         "systemctl is-active borg-backup.path"
     chk "Borg fallback timer active"       "systemctl is-active borg-backup.timer"
     chk "DNS resolution"                   "getent hosts archive.ubuntu.com"
@@ -1492,7 +1558,7 @@ verify() {
 
 # ================================ DISPATCH ===================================
 usage() {
-    sed -n '32,51p' "$0"
+    sed -n '48,67p' "$0"
     echo "Phases: preflight phase1 phase2 phase3 phase4 phase5 phase6 phase7 phase8 phase9 phase10 phase11 phase12 verify"
     echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-12 + verify)  all (everything with the stop)"
 }

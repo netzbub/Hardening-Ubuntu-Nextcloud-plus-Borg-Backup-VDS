@@ -67,7 +67,7 @@ Two principles run through everything:
 | **Caddy** (native, not containerized) | Reverse proxy + automatic TLS | Terminates HTTPS for`next.<domain>`, automatic Let's Encrypt               |
 | **WireGuard**                         | Admin VPN                     | The only path to the admin panels; keeps them off the public net             |
 | **Borg**                              | Deduplicating backup          | Server self-backup + the local machine's off-site copy, both on the 4 TB HDD |
-| **Runtipi**                           | App store panel               | One-click Docker apps, reachable only via WireGuard                          |
+| **Portainer CE**                      | Container management panel    | Docker deploy + monitoring, no bundled proxy, reachable only via WireGuard   |
 | **Cockpit**                           | Host monitoring/control       | Logs, storage, services; socket-activated, WireGuard-only                    |
 | **ufw + nftables**                    | Firewall                      | Default-deny; a`DOCKER-USER` rule closes Docker's well-known ufw bypass    |
 | **fail2ban**                          | Intrusion throttling          | Bans SSH and Nextcloud brute-force, IPv6 banned as a`/64` prefix           |
@@ -84,7 +84,7 @@ The state this repository reflects — the design pursued and actually installed
 - **Nextcloud** as a Docker Compose stack: `app` + `db` (MariaDB) + `redis` + `cron`, data directory on the 4 TB HDD, admin account created unattended at first start, TOTP two-factor **enforced**.
 - **Caddy** native on the host as the public reverse proxy for `next.<domain>` (`127.0.0.1:8080` → HTTPS), with automatic certificates gated behind a DNS check so a misconfigured record can't burn the Let's Encrypt rate limit.
 - **Docker** hardened at the daemon level (`no-new-privileges`, `userland-proxy: false`, IPv6 off) and behind a `DOCKER-USER` firewall rule that prevents published container ports from bypassing ufw.
-- **WireGuard** as the sole route to **Runtipi** (`10.8.0.1:8090`) and **Cockpit** (`10.8.0.1:9090`); both proven closed from the public internet by external scan.
+- **WireGuard** as the sole route to **Portainer CE** (`10.8.0.1:9443`) and **Cockpit** (`10.8.0.1:9090`); both proven closed from the public internet by external scan.
 
 ---
 
@@ -106,16 +106,18 @@ The 4 TB HDD is, first and foremost, an **off-site backup vault for the operator
 
 Backups are **event-triggered, not clock-based** (the operator works at night): after the local machine finishes its push it drops a trigger file, a systemd path unit fires the server's self-backup, and a weekly timer is the fallback safety net. There is deliberately **no second provider / no StorageBox**: for the Mac's data the server itself *is* the off-site copy (`repo-local`), and locally there are three further backups. The accepted residual risk (simultaneous loss of office and server) is documented and consciously taken.
 
+**Space headroom on the data volume.** Both Nextcloud's blobs and the Borg repositories share `$HDD_MOUNT`, so an ext4 reserved-blocks setting (`tune2fs -m 5`) keeps the last 5 % off-limits to normal writers, and a twice-daily timer mails a warning at 85 % and a critical alert at 95 %. Both are percentage-based against whatever is currently mounted there — no code change needed across the transitional second 500 GB NVMe and the eventual 4 TB HDD.
+
 ---
 
 ### Control panels: the two we chose
 
 After surveying a field of lightweight panels (full comparison: [SCPs.md](SCPs.md) · [SCPs.de.md](SCPs.de.md)) the choice was two complementary tools rather than one heavy all-in-one:
 
-- **Runtipi** — an app store for one-click Docker apps. Its own proxy is moved off `80/443` to `8090/8445` and bound to the WireGuard address.
+- **Portainer CE** — Docker deploy and monitoring. Needs neither `80` nor `443`, ships no proxy of its own, binds directly to the WireGuard address. Deploy templates, not a maintained app store — updates of deployed containers are run by hand.
 - **Cockpit** — host-level monitoring and control (logs, storage, services), socket-activated so it costs almost nothing when idle.
 
-Both are reachable **only** through the WireGuard tunnel; an earlier candidate (Dockge) was dropped. Nextcloud itself is intentionally the only public service.
+Both are reachable **only** through the WireGuard tunnel; earlier candidates (Dockge, Runtipi, Dokploy, Coolify, CasaOS, Cosmos) were dropped — Runtipi specifically because it ships its own proxy, needs `80`/`443`-adjacent ports, and adds a second Docker-socket holder without buying maintained apps over Portainer's plain deploy templates. Nextcloud itself is intentionally the only public service.
 
 ---
 
@@ -134,7 +136,7 @@ Mid-level overview, roughly in the order the script applies it:
 - **WireGuard** — server keypair + preshared key; the admin panels live behind it.
 - **Docker + Caddy + Nextcloud** — hardened daemon, sandboxed Caddy service, per-service memory/PID limits, DNS gate before TLS issuance, enforced Nextcloud 2FA.
 - **Borg backup** — append-only key for the local machine, event trigger, failure alarm.
-- **Admin panels** — Cockpit + Runtipi, WireGuard-only.
+- **Admin panels** — Cockpit + Portainer CE, WireGuard-only.
 - **Service cleanup + AIDE** — disable unneeded VM guest services, remove the cloud-init `ubuntu` account, build the AIDE file-integrity baseline.
 - **Reachability from the operator** — the public path is Nextcloud over HTTPS; everything administrative is reached through the **WireGuard tunnel** (and, for a single forwarded service port, an **SSH `-L` tunnel** on top).
 
@@ -152,7 +154,7 @@ The script runs in numbered phases and can be driven three ways:
 
 Verification is not optional and not self-reported:
 
-- external `nmap -Pn` **and** `nmap -6 -Pn` against `8090/8445/9090` — they must be filtered from the public internet;
+- external `nmap -Pn` **and** `nmap -6 -Pn` against `9443/9090` — they must be filtered from the public internet;
 - `verify` health check (SSH effective config via `sshd -T`, firewall, fail2ban, auditd, AppArmor, mounts, services);
 - `fail2ban-regex` against **real** Nextcloud failed-login lines;
 - an actual Borg **restore** (`borg extract`) before trusting the backup;
@@ -178,8 +180,6 @@ Only what this project sets up and configures — not the Ubuntu standard tree:
         ├── repo-server/             # Borg: server self-backup
         ├── repo-local/              # Borg: local machine → server (append-only)
         └── trigger/                 # event trigger for the server backup
-
-/opt/runtipi/                        # Runtipi app store (WireGuard-only)
 
 /etc/
 ├── ssh/sshd_config.d/10-hardening.conf
@@ -241,6 +241,8 @@ The idea and the concept are mine and I defined the requirements for the script.
 | :--- | :--- | :--- |
 | v0.1.0 | Initial release: install.sh, READMEs (EN/DE), install guide, SCPs comparison, security policy, changelog, GPL-3.0 license | 2026.07.21 |
 | v0.1.1 | ShellCheck GitHub Action (shellcheck.yml) + badge, additional paragraph concerning Version History inside README.md | 2026.07.21 |
+| v0.2.0 | Panel decision: Portainer CE replaces Runtipi (phase 11) after a four-criteria comparison against Dokploy, Coolify, CasaOS and Cosmos; fixed a phase-3 abort bug (`set -e` killed the phase whenever the SSH-alt-port branch wasn't taken); multi-agent security/robustness/style review of install.sh folded back | 2026.08.01 |
+| v0.3.0 | Disk-space headroom on `$HDD_MOUNT`: ext4 5% reserved-blocks plus a twice-daily 85%/95% mail alert (`disk-space-alert.sh`/`.timer`), percentage-based so it works unchanged across the transitional 500 GB NVMe and the eventual 4 TB HDD; two new `verify` checks; AIDE excludes and docs updated | 2026.08.01 |
 
 ---
 
@@ -255,7 +257,7 @@ Why GPL-3.0 and not a permissive license: the operator's intent is explicit shar
 ### Acknowledgments
 
 - Design, scripting, documentation and review in teamwork with `Claude Opus 4.8` and `Claude Fable 5` (Cowork), with multi-agent council reviews of the hardening script.
-- Built on the shoulders of the upstream projects: Ubuntu, Docker, Nextcloud, Caddy, WireGuard, BorgBackup, Runtipi, Cockpit, fail2ban, auditd, AIDE and Lynis (CISOfy).
+- Built on the shoulders of the upstream projects: Ubuntu, Docker, Nextcloud, Caddy, WireGuard, BorgBackup, Portainer, Cockpit, fail2ban, auditd, AIDE and Lynis (CISOfy).
 - Not affiliated with or endorsed by any of the above projects.  
 
 ### Trademarks + Logos

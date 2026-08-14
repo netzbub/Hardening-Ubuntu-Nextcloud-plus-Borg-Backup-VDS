@@ -179,6 +179,11 @@ mountpoint -q /srv/hdd && echo "HDD ok"
 > `nofail` prevents an emergency boot without SSH if the HDD is ever missing. Test without a
 > real HDD (loopback): see Part 5.
 
+> Phase 9 sets an explicit `tune2fs -m 5` reserved-blocks headroom on this device and installs
+> a twice-daily disk-space-alert timer (85%/95% thresholds, mailed) — both keyed off whatever
+> is mounted at `/srv/hdd`, so this works unchanged for the transitional second 500 GB NVMe
+> and, from month 5, the 4 TB HDD. No manual step needed here beyond the mount itself.
+
 ---
 
 # PART 2 — RUN
@@ -378,7 +383,7 @@ ping 10.8.0.1 && sudo wg show
 sudo wg-quick down ~/.wireguard/wg0-client.conf
 ```
 
-In the tunnel: Runtipi `http://10.8.0.1:8090`, Cockpit `https://10.8.0.1:9090`.
+In the tunnel: Portainer `https://10.8.0.1:9443`, Cockpit `https://10.8.0.1:9090`.
 
 ## 3.5 Reboot
 
@@ -410,12 +415,12 @@ CIS deviations are documented in the README).
 `[ ! Do ! ]` From a foreign network (phone hotspot), with the WireGuard tunnel DOWN:
 
 ```
-nmap -Pn 203.0.113.10 -p 22022,80,443,8090,8445,9090
-nmap -6 -Pn 2001:db8::c -p 8090,8445,9090
+nmap -Pn 203.0.113.10 -p 22022,80,443,9443,9090
+nmap -6 -Pn 2001:db8::c -p 9443,9090
 ```
 
 - MAY be open: 22022 (SSH), 80/443 (Caddy). WireGuard 51820/udp does not answer scans.
-- MUST be closed: 8090/8445 (Runtipi), 9090 (Cockpit) — over IPv4 AND IPv6. The internal
+- MUST be closed: 9443 (Portainer), 9090 (Cockpit) — over IPv4 AND IPv6. The internal
   `verify` does NOT see this exposure.
 
 Internal check:
@@ -472,7 +477,7 @@ BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg key import ssh://netzbub@203.0.1
 | Caddy | `/etc/caddy/Caddyfile` | – | `journalctl -u caddy` |
 | Borg repo-server | `/srv/hdd/backup/repo-server` | `/root/.borg-passphrase` | `journalctl -u borg-backup` |
 | Borg repo-local | `/srv/hdd/backup/repo-local` | passphrase #3; key export in `~/` (local) | – |
-| Runtipi | `/opt/runtipi/state/settings.json` | – | `./runtipi-cli logs` |
+| Portainer | `docker inspect portainer` | – | `docker logs portainer` |
 | Cockpit | – | – | `journalctl -u cockpit` |
 | Lynis | `/etc/lynis/default.prf` | – | `/var/log/lynis.log` |
 | AIDE | `/etc/aide/aide.conf.d/` | – | `/var/lib/aide/aide.db` |
@@ -490,13 +495,13 @@ logwatch daily, fail2ban bans, Caddy TLS renewal, container restart, timesyncd.
 - Borg: failure mail is automatic; occasionally check `borg list`
 - `df -h` (NVMe and HDD separately)
 - NC major updates manually (4.2)
-- Runtipi app updates in the dashboard
+- container/image updates in Portainer are run by hand, not automatic (no maintained app store)
 - monthly `lynis audit system`, keep an eye on the hardening index (±1–2 points is noise)
 
 ## 4.5 Access paths
 
 - **Nextcloud** `https://next.example.com`: public via Caddy.
-- **Runtipi/Cockpit**: only over WireGuard (`10.8.0.1:8090` / `:9090`), closed from outside.
+- **Portainer/Cockpit**: only over WireGuard (`10.8.0.1:9443` / `:9090`), closed from outside.
 - **SSH** port 22022: public, but key-only + fail2ban.
 
 ## 4.6 One-way sync local → Nextcloud
