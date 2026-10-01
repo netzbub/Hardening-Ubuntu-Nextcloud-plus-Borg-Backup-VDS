@@ -44,6 +44,20 @@
 #            Percentage-based - unchanged whether $HDD_MOUNT is the transitional second
 #            500 GB NVMe or, from month 5, the 4 TB HDD. Two new verify checks; AIDE
 #            excludes extended for the alert script's state directory.
+# Rev. 7 (2026-10-01) - first complete end-to-end run on a real machine; folded back:
+#          - FIXED: sysctl file renamed to 99-zz-hardening.conf. The old name sorted BEFORE
+#            Ubuntu's /usr/lib/sysctl.d/99-protect-links.conf and was overridden by it -
+#            fs.protected_fifos read 2 in the file but ran at 1. Silent failure, unseen by verify.
+#          - Panel CA (phase 11): Cockpit's cert named the FQDN, Portainer's had an EMPTY
+#            subject, while both panels are reached at https://<WG>.1:PORT - no browser can
+#            match that. Own CA, one cert with IP:<WG>.1 in the SAN, 800 days, serverAuth.
+#          - SSH_CLIENT_KEY + server_ip()/login_cmd(): login hints now print a ready-to-paste
+#            command with key path and real IPv4 instead of <ip> placeholders.
+#          - login.defs SHA_CRYPT_MIN/MAX_ROUNDS=65536; legal banner in /etc/issue(.net).
+#          - Verified on real hardware: Redis cap_add set sufficient (no DAC_OVERRIDE),
+#            Portainer CE starts, Caddy DNS gate passed first try, msmtp delivers (250),
+#            NC fail2ban filter matches real lines, IPv6 ban enters the whole /64,
+#            Borg restore round-trip byte-identical + borg check --verify-data OK.
 #
 # USAGE (as root on a fresh Ubuntu 24.04):
 #   ./install.sh preflight        # checks + apt update/upgrade
@@ -86,6 +100,7 @@ fi
 ADMIN_USER="${ADMIN_USER:-}"               # sudo admin user (SSH login); no default
 SSH_PORT="${SSH_PORT:-22022}"              # non-standard SSH port
 SSH_PUBKEY="${SSH_PUBKEY:-}"               # REQUIRED: full ed25519 public key line
+SSH_CLIENT_KEY="${SSH_CLIENT_KEY:-}"       # path to the PRIVATE key on YOUR client (for the printed login hints)
 ADMIN_MAIL="${ADMIN_MAIL:-}"               # REQUIRED: valid address for system mail
 HOSTNAME_FQDN="${HOSTNAME_FQDN:-}"         # optional FQDN (e.g. server.example.com); empty = keep provider hostname
 
@@ -139,6 +154,42 @@ die()  { echo -e "${C_RED}[ERROR]${C_OFF} $*" | tee -a "$LOGFILE"; exit 1; }
 
 require_root() { [[ $EUID -eq 0 ]] || die "Run as root."; }
 
+# --- login hint helpers -------------------------------------------------------
+server_ip() {  # primary IPv4 of this machine (source address of the default route)
+    local ip
+    ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+    [[ -n "$ip" ]] || ip="<server-ip>"
+    printf '%s' "$ip"
+}
+
+login_cmd() {  # login_cmd [port] -> ready-to-paste ssh command for the client
+    local port="${1:-$SSH_PORT}"
+    local key="${SSH_CLIENT_KEY:-<path-to-your-private-key>}"
+    printf 'ssh -i %s %s@%s -p %s' "$key" "$ADMIN_USER" "$(server_ip)" "$port"
+}
+
+ask_client_key() {  # asked ONCE in preflight, stored back into install.conf
+    if [[ -n "$SSH_CLIENT_KEY" ]]; then return 0; fi
+    if [[ -t 0 ]]; then
+        echo ""
+        warn "Path to the PRIVATE SSH key on YOUR machine (the counterpart of SSH_PUBKEY)."
+        warn "It is only used to print ready-to-paste login commands. Example: ~/.ssh/id_ed25519"
+        read -r -p "SSH_CLIENT_KEY: " SSH_CLIENT_KEY || true
+    fi
+    if [[ -z "$SSH_CLIENT_KEY" ]]; then
+        warn "SSH_CLIENT_KEY not set - login hints will show a placeholder instead of the key path."
+        return 0
+    fi
+    if [[ -f "$INSTALL_CONF" ]]; then
+        if grep -q '^SSH_CLIENT_KEY=' "$INSTALL_CONF"; then
+            sed -i "s|^SSH_CLIENT_KEY=.*|SSH_CLIENT_KEY=\"$SSH_CLIENT_KEY\"|" "$INSTALL_CONF"
+        else
+            printf 'SSH_CLIENT_KEY="%s"\n' "$SSH_CLIENT_KEY" >> "$INSTALL_CONF"
+        fi
+        log "SSH_CLIENT_KEY stored in $INSTALL_CONF"
+    fi
+}
+
 backup_file() {  # backup_file <path>
     local f="$1"
     [[ -f "$f" ]] && cp -a "$f" "${f}.bak.$(date +%Y%m%d-%H%M%S)"
@@ -163,6 +214,7 @@ gen_secret() {  # gen_secret <name>  - create/read a secret, print it to stdout
 preflight() {
     require_root
     log "Preflight checks"
+    ask_client_key
     grep -q 'VERSION_ID="24.04"' /etc/os-release || warn "No Ubuntu 24.04 detected - this script is written for 24.04!"
     [[ -n "$SSH_PUBKEY" ]] || die "SSH_PUBKEY is empty - set the public key in install.conf."
     # Key VALIDATION (Review K4): a mangled pasted key = total lock-out after phase2
@@ -231,7 +283,9 @@ Defaults logfile="/var/log/sudo.log"
 EOF
     chmod 440 /etc/sudoers.d/hardening
     visudo -c >/dev/null || die "sudoers syntax error!"
-    log "Phase 1 done. TEST in a 2nd terminal: ssh -i <key> ${ADMIN_USER}@<ip>  &&  sudo -v"
+    log "Phase 1 done. TEST in a 2nd terminal:"
+    log "    $(login_cmd 22)"
+    log "    then:  sudo -v"
 }
 
 # ============================ PHASE 2: SSH HARDENING ========================
@@ -293,7 +347,8 @@ EOF
     systemctl daemon-reload
     systemctl enable ssh.service
     systemctl restart ssh.service
-    log "Phase 2 done. KEEP THE SESSION OPEN and test in a 2nd terminal: ssh -p $SSH_PORT ${ADMIN_USER}@<ip>"
+    log "Phase 2 done. KEEP THE SESSION OPEN and test in a 2nd terminal:"
+    log "    $(login_cmd)"
 }
 
 # ============================ PHASE 3: FIREWALL ==============================
@@ -415,7 +470,10 @@ phase5() {
     require_root
     log "Phase 5: sysctl, modprobe, GRUB, fstab, limits, permissions"
 
-    cat > /etc/sysctl.d/99-hardening.conf <<'EOF'
+    # File name must sort AFTER Ubuntu's own /usr/lib/sysctl.d/99-protect-links.conf,
+    # otherwise values present in both (e.g. fs.protected_fifos) are silently reverted.
+    rm -f /etc/sysctl.d/99-hardening.conf
+    cat > /etc/sysctl.d/99-zz-hardening.conf <<'EOF'
 # === Network: anti-spoofing / anti-MITM ===
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
@@ -560,6 +618,24 @@ EOF
     sed -i -E 's|^PASS_MAX_DAYS[[:space:]]+.*|PASS_MAX_DAYS\t365|' /etc/login.defs
     sed -i -E 's|^PASS_MIN_DAYS[[:space:]]+.*|PASS_MIN_DAYS\t1|' /etc/login.defs
     sed -i -E 's|^PASS_WARN_AGE[[:space:]]+.*|PASS_WARN_AGE\t14|' /etc/login.defs
+    # Password hashing rounds (Lynis AUTH-9230); effective because ENCRYPT_METHOD is SHA512:
+    if grep -qE '^#?[[:space:]]*SHA_CRYPT_MIN_ROUNDS' /etc/login.defs; then
+        sed -i -E 's|^#?[[:space:]]*SHA_CRYPT_MIN_ROUNDS[[:space:]]+.*|SHA_CRYPT_MIN_ROUNDS 65536|' /etc/login.defs
+    else
+        printf 'SHA_CRYPT_MIN_ROUNDS 65536\n' >> /etc/login.defs
+    fi
+    if grep -qE '^#?[[:space:]]*SHA_CRYPT_MAX_ROUNDS' /etc/login.defs; then
+        sed -i -E 's|^#?[[:space:]]*SHA_CRYPT_MAX_ROUNDS[[:space:]]+.*|SHA_CRYPT_MAX_ROUNDS 65536|' /etc/login.defs
+    else
+        printf 'SHA_CRYPT_MAX_ROUNDS 65536\n' >> /etc/login.defs
+    fi
+    # Legal banner before and after login (Lynis BANN-7126/7130):
+    cat > /etc/issue <<'BANNEREOF'
+Zugang nur fuer Berechtigte. Alle Zugriffe werden protokolliert.
+Authorised access only. All access is logged and monitored.
+BANNEREOF
+    cp /etc/issue /etc/issue.net
+    chmod 644 /etc/issue /etc/issue.net
     chage -M 365 -m 1 -W 14 "$ADMIN_USER" 2>/dev/null || true
     printf 'TMOUT=900\nreadonly TMOUT\nexport TMOUT\n' > /etc/profile.d/99-tmout.sh; chmod 644 /etc/profile.d/99-tmout.sh
     printf 'umask 027\n' > /etc/profile.d/99-umask.sh; chmod 644 /etc/profile.d/99-umask.sh
@@ -1402,8 +1478,51 @@ phase11() {
     log "Phase 11: Cockpit + Portainer CE (reachable via WireGuard only)"
     wg show wg0 &>/dev/null || die "WireGuard (phase8) must be running - panels are exposed ONLY over the tunnel."
 
+    # === Panel CA + certificate for the WireGuard address (Rev.7) ===
+    # Both panels are reached as https://<WG>.1:PORT. A certificate without that IP in
+    # its SAN makes every browser warn, however much the user trusts it. Apple additionally
+    # requires a SAN (CN alone is ignored) and a lifetime of at most 825 days.
+    local ca_dir="$SECRETS_DIR/panel-ca"
+    install -d -m 700 "$ca_dir"
+    if [[ ! -f "$ca_dir/ca.crt" ]]; then
+        openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+            -keyout "$ca_dir/ca.key" -out "$ca_dir/ca.crt" \
+            -subj "/CN=${HOSTNAME_FQDN:-$(hostname)} Panel CA" \
+            -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null \
+            || die "Panel CA could not be created."
+        chmod 600 "$ca_dir/ca.key"
+        log "Panel CA created: $ca_dir/ca.crt"
+    fi
+    if [[ ! -f "$ca_dir/panel.crt" ]]; then
+        cat > "$ca_dir/panel.ext" <<EXTEOF
+basicConstraints=CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=IP:${WG_NET}.1${HOSTNAME_FQDN:+,DNS:$HOSTNAME_FQDN}
+EXTEOF
+        openssl req -newkey rsa:2048 -sha256 -nodes \
+            -keyout "$ca_dir/panel.key" -out "$ca_dir/panel.csr" \
+            -subj "/CN=${WG_NET}.1" 2>/dev/null \
+            || die "Panel key could not be created."
+        openssl x509 -req -in "$ca_dir/panel.csr" -CA "$ca_dir/ca.crt" -CAkey "$ca_dir/ca.key" \
+            -CAcreateserial -days 800 -sha256 -extfile "$ca_dir/panel.ext" \
+            -out "$ca_dir/panel.crt" 2>/dev/null \
+            || die "Panel certificate could not be signed."
+        rm -f "$ca_dir/panel.csr"
+        chmod 600 "$ca_dir/panel.key"
+        log "Panel certificate created for ${WG_NET}.1 (800 days)."
+    fi
+
     # Cockpit: socket-activated, uses practically nothing without an open session.
     apt-get install -y -q cockpit
+    # Hand Cockpit the panel certificate. A higher number wins over 0-self-signed:
+    install -d /etc/cockpit/ws-certs.d
+    cp "$ca_dir/panel.crt" /etc/cockpit/ws-certs.d/1-panel.cert
+    cp "$ca_dir/panel.key" /etc/cockpit/ws-certs.d/1-panel.key
+    chmod 644 /etc/cockpit/ws-certs.d/1-panel.cert
+    chmod 640 /etc/cockpit/ws-certs.d/1-panel.key
+    chgrp cockpit-ws /etc/cockpit/ws-certs.d/1-panel.key 2>/dev/null || true
     # M6: bind the socket ONLY to the WireGuard address - not 0.0.0.0. ufw is then
     # only the second line, not the only one. (The drop-in overrides the default listen.)
     install -d /etc/systemd/system/cockpit.socket.d
@@ -1430,7 +1549,9 @@ EOF
                 -p "${WG_NET}.1:${PORTAINER_PORT}:9443" \
                 -v /var/run/docker.sock:/var/run/docker.sock \
                 -v portainer_data:/data \
+                -v "$ca_dir":/certs:ro \
                 portainer/portainer-ce:lts \
+                --sslcert /certs/panel.crt --sslkey /certs/panel.key \
                 || die "Portainer container failed to start - check 'docker logs portainer'."
         fi
         ufw allow in on wg0 to any port "$PORTAINER_PORT" proto tcp comment 'Portainer via WireGuard'
@@ -1438,6 +1559,8 @@ EOF
         warn "Docker missing (phase9) - Portainer skipped."
     fi
     log "Phase 11 done. In the tunnel:  Cockpit https://${WG_NET}.1:9090  |  Portainer https://${WG_NET}.1:${PORTAINER_PORT}"
+    log "Import the CA root once on your client, then the browser warning is gone for good:"
+    log "    $ca_dir/ca.crt"
     warn "REQUIRED after 'all': check from OUTSIDE (a foreign network) that ${PORTAINER_PORT}/9090 are closed -"
     warn "    nmap -Pn <server-ipv4> -p ${PORTAINER_PORT},9090   UND   nmap -6 -Pn <server-ipv6> -p ${PORTAINER_PORT},9090"
     warn "(Council-Fix 5: scan v6 separately - a v4 scan does not see an IPv6 hole; ss does not see the iptables exposure.)"
@@ -1575,7 +1698,9 @@ main() {
         bootstrap)
             preflight; phase1; phase2
             echo ""
-            warn "STOP: now log in from a SECOND terminal:  ssh -p $SSH_PORT ${ADMIN_USER}@<server-ip>  &&  sudo -v"
+            warn "STOP: now log in from a SECOND terminal:"
+            warn "    $(login_cmd)"
+            warn "    then:  sudo -v"
             warn "Login OK -> save the admin password offline:  cat $SECRETS_DIR/admin-user-password"
             warn "Only THEN continue with:  ./install.sh rest"
             ;;
@@ -1591,7 +1716,8 @@ main() {
             preflight; phase1; phase2
             # Mandatory login test - 'all' must not close SSH untested (Review K4):
             echo ""
-            warn "STOP: now log in from a SECOND terminal:  ssh -p $SSH_PORT ${ADMIN_USER}@<server-ip>"
+            warn "STOP: now log in from a SECOND terminal:"
+            warn "    $(login_cmd)"
             read -r -p "Login in the second terminal successful? Only then type 'yes': " ans \
                 || die "No interactive terminal - 'all' needs input. Run the phases individually."
             [[ "$ans" == "yes" ]] || die "Aborted - test the SSH login first, then run './install.sh all' again (phases are idempotent)."

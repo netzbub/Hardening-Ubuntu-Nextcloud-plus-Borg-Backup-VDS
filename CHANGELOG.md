@@ -2,6 +2,35 @@
 
 All notable changes to this project are documented here. Versions follow a SemVer-style `0.x` scheme. The detailed pre-release script-revision log (install.sh Rev. 4 → Rev. 5) is kept at the bottom for reference.
 
+## [0.4.0] - 2026-10-01
+
+First complete end-to-end run on a real machine (Hostishere test server, Ubuntu 24.04.5,
+1 core / 2 GB). All thirteen phases ran in sequence, `verify` reported 44/44 before and
+after the reboot, and the full mandatory validation chain of `Handover.md` §9 passed.
+
+### Fixed
+
+- **sysctl hardening was partly ineffective.** The settings were written to `/etc/sysctl.d/99-hardening.conf`, which sorts *before* Ubuntu's own `/usr/lib/sysctl.d/99-protect-links.conf` and was therefore overridden by it: `fs.protected_fifos` was set to 2 in the file but ran at 1 on the live system. The file is now written as `99-zz-hardening.conf` and the old name is removed on each run. This was a silent failure — `verify` never saw it, and it would have hit any future hardening value that also appears in a later-sorting system file.
+
+### Added
+
+- **Panel CA (phase 11).** Cockpit shipped a certificate for the host FQDN and Portainer one with a completely empty subject, while both panels are reached as `https://<WG>.1:PORT`. No browser can match either certificate to that address, so the warning persisted no matter how often the certificate was trusted. Phase 11 now creates a small CA in `$SECRETS_DIR/panel-ca`, issues one certificate carrying `IP:<WG>.1` in its SAN (plus the FQDN when set), hands it to Cockpit as `1-panel.cert` and to Portainer via `--sslcert`/`--sslkey`, and prints the path of the root certificate for a one-time import on the client. Lifetime 800 days, `serverAuth` EKU and SAN as required by Apple's certificate policy.
+- **`SSH_CLIENT_KEY`** config variable plus the helpers `server_ip()` and `login_cmd()`. The login hints after phase 1, phase 2, `bootstrap` and `all` now print a ready-to-paste command including the key path and the machine's actual IPv4 instead of `<ip>` placeholders. `preflight` asks for the value once if unset and writes it back to `install.conf`.
+- **Password hashing rounds** (phase 5): `SHA_CRYPT_MIN_ROUNDS`/`SHA_CRYPT_MAX_ROUNDS` set to 65536 in `login.defs`. Effective because `ENCRYPT_METHOD` is SHA512 (Lynis AUTH-9229/9230).
+- **Legal banner** in `/etc/issue` and `/etc/issue.net`, bilingual (Lynis BANN-7126/7130).
+
+### Changed
+
+- ShellCheck workflow tightened from `--severity=error` to `--severity=warning`; `install.sh` is clean at that level (verified with ShellCheck 0.9.0, only SC2015/SC1091 remain on "info").
+- `README.md`, `README.de.md` and `Install-Guide.md`: the storage-transition wording no longer names a "second 500 GB NVMe" or "month 5" — both became wrong with the change of provider.
+
+### Notes
+
+- Verified on real hardware for the first time: the Redis `cap_add` set (CHOWN/SETUID/SETGID) is sufficient, no `DAC_OVERRIDE` needed; Portainer CE starts and binds only to the WireGuard address; the Caddy DNS gate passed on the first attempt; msmtp delivers (status 250); the Nextcloud fail2ban filter matches real log lines and the IPv6 ban enters the whole `/64` into the `f2b-v6prefix` ipset; a Borg restore round-trip extracted byte-identical files and `borg check --verify-data` passed.
+- External `nmap` from a foreign network, over IPv4 and separately over IPv6: 80, 443 and the SSH port open, port 22 and both panel ports filtered. No IPv6-only hole.
+- Two Lynis findings turned out to be false alarms and were deliberately not "fixed": AIDE's `Checksums = H` already means every compiled-in hash including SHA-512, and the debsums cron job exists (phase 7) but is not where Lynis looks for it.
+- `Handover.md` §4 claimed the test server runs UEFI; it does not (`/sys/firmware/efi` absent). The argument that the test run is therefore transferable to a UEFI production server does not hold.
+
 ## [0.3.0] - 2026-08-01
 
 ### Added

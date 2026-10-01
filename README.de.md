@@ -107,7 +107,7 @@ Die 4-TB-HDD ist in erster Linie ein **Off-site-Backup-Tresor für die lokalen (
 
 Backups laufen **event-getriggert, nicht nach Uhrzeit** (der Betreiber arbeitet nachts): Nach dem Push des lokalen Rechners legt dieser eine Trigger-Datei ab, eine systemd-Path-Unit stößt die Server-Selbstsicherung an, und ein wöchentlicher Timer ist das Auffangnetz. Bewusst **kein Zweitprovider / keine StorageBox**: Für die Mac-Daten *ist* der Server selbst die Off-site-Kopie (`repo-local`), und lokal existieren drei weitere Backups. Das akzeptierte Restrisiko (gleichzeitiger Verlust von Büro und Server) ist dokumentiert und bewusst getragen.
 
-**Speicher-Puffer auf dem Datenvolume.** Nextclouds Blobs und die Borg-Repositories teilen sich `$HDD_MOUNT`; ein ext4-Reserved-Blocks-Wert (`tune2fs -m 5`) hält die letzten 5 % für normale Schreibprozesse gesperrt, und ein zweimal täglicher Timer mailt eine Warnung bei 85 % und einen kritischen Alarm bei 95 %. Beides ist prozentual gegen das jeweils gemountete Gerät gerechnet — kein Code-Unterschied zwischen der Übergangs-NVMe#2 mit 500 GB und der späteren 4-TB-HDD.
+**Speicher-Puffer auf dem Datenvolume.** Nextclouds Blobs und die Borg-Repositories teilen sich `$HDD_MOUNT`; ein ext4-Reserved-Blocks-Wert (`tune2fs -m 5`) hält die letzten 5 % für normale Schreibprozesse gesperrt, und ein zweimal täglicher Timer mailt eine Warnung bei 85 % und einen kritischen Alarm bei 95 %. Beides ist prozentual gegen das jeweils gemountete Gerät gerechnet — kein Code-Unterschied zwischen einem Übergangsvolume und der späteren 4-TB-HDD.
 
 ---
 
@@ -243,6 +243,7 @@ Die Idee, das Konzept und die Anforderungen habe ich entwickelt. Design,Skriptin
 | v0.1.0 | Erstveröffentlichung: install.sh, READMEs (EN/DE), Installationsanleitung, SCP-Vergleich, Sicherheitsrichtlinie, Changelog, GPL-3.0-Lizenz  | 2026.07.21 |
 | v0.1.1 |  ShellCheck-GitHub-Action (shellcheck.yml) + Badge, zusätzlicher Absatz zum Versionsverlauf in der README.md | 2026.07.21 |
 | v0.2.0 | Panel-Entscheidung: Portainer CE ersetzt Runtipi (Phase 11) nach Vergleich gegen Dokploy, Coolify, CasaOS und Cosmos anhand von vier Kriterien; Phase-3-Abbruchfehler behoben (`set -e` beendete die Phase, sobald der SSH-Alt-Port-Zweig nicht griff); Multi-Agenten-Review (Security/Robustheit/Stil) von install.sh eingearbeitet | 2026.08.01 |
+| v0.4.0 | Erster vollständiger Lauf am Stück auf einer echten Maschine (44/44 vor und nach dem Reboot, komplette Validierungskette aus §9 bestanden). BEHOBEN: sysctl-Datei heißt jetzt `99-zz-hardening.conf` — der alte Name sortierte vor Ubuntus `99-protect-links.conf` und wurde still überschrieben. NEU: Panel-CA mit Zertifikat samt `IP:<WG>.1` im SAN für Cockpit und Portainer; `SSH_CLIENT_KEY` und fertige Login-Befehle in den Hinweisen; Passwort-Hashing-Runden; Rechtstext im Login-Banner. ShellCheck-Workflow auf `warning` verschärft | 2026.10.01 |
 | v0.3.0 | Speicher-Puffer auf `$HDD_MOUNT`: ext4-5%-Reserved-Blocks plus zweimal täglicher 85%/95%-Mail-Alarm (`disk-space-alert.sh`/`.timer`), prozentual gerechnet, läuft unverändert über die Übergangs-NVMe#2 und die spätere 4-TB-HDD hinweg; zwei neue `verify`-Checks; AIDE-Excludes und Doku aktualisiert | 2026.08.01 |
 
 ---
