@@ -181,8 +181,8 @@ mountpoint -q /srv/hdd && echo "HDD ok"
 
 > Phase 9 sets an explicit `tune2fs -m 5` reserved-blocks headroom on this device and installs
 > a twice-daily disk-space-alert timer (85%/95% thresholds, mailed) — both keyed off whatever
-> is mounted at `/srv/hdd`, so this works unchanged for the transitional second 500 GB NVMe
-> and, from month 5, the 4 TB HDD. No manual step needed here beyond the mount itself.
+> is mounted at `/srv/hdd`, so this works unchanged for a transitional volume and for the
+> eventual 4 TB HDD. No manual step needed here beyond the mount itself.
 
 ---
 

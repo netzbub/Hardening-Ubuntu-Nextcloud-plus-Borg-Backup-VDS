@@ -106,7 +106,7 @@ The 4 TB HDD is, first and foremost, an **off-site backup vault for the operator
 
 Backups are **event-triggered, not clock-based** (the operator works at night): after the local machine finishes its push it drops a trigger file, a systemd path unit fires the server's self-backup, and a weekly timer is the fallback safety net. There is deliberately **no second provider / no StorageBox**: for the Mac's data the server itself *is* the off-site copy (`repo-local`), and locally there are three further backups. The accepted residual risk (simultaneous loss of office and server) is documented and consciously taken.
 
-**Space headroom on the data volume.** Both Nextcloud's blobs and the Borg repositories share `$HDD_MOUNT`, so an ext4 reserved-blocks setting (`tune2fs -m 5`) keeps the last 5 % off-limits to normal writers, and a twice-daily timer mails a warning at 85 % and a critical alert at 95 %. Both are percentage-based against whatever is currently mounted there — no code change needed across the transitional second 500 GB NVMe and the eventual 4 TB HDD.
+**Space headroom on the data volume.** Both Nextcloud's blobs and the Borg repositories share `$HDD_MOUNT`, so an ext4 reserved-blocks setting (`tune2fs -m 5`) keeps the last 5 % off-limits to normal writers, and a twice-daily timer mails a warning at 85 % and a critical alert at 95 %. Both are percentage-based against whatever is currently mounted there — no code change needed across a transitional volume and the eventual 4 TB HDD.
 
 ---
 
@@ -242,6 +242,7 @@ The idea and the concept are mine and I defined the requirements for the script.
 | v0.1.0 | Initial release: install.sh, READMEs (EN/DE), install guide, SCPs comparison, security policy, changelog, GPL-3.0 license | 2026.07.21 |
 | v0.1.1 | ShellCheck GitHub Action (shellcheck.yml) + badge, additional paragraph concerning Version History inside README.md | 2026.07.21 |
 | v0.2.0 | Panel decision: Portainer CE replaces Runtipi (phase 11) after a four-criteria comparison against Dokploy, Coolify, CasaOS and Cosmos; fixed a phase-3 abort bug (`set -e` killed the phase whenever the SSH-alt-port branch wasn't taken); multi-agent security/robustness/style review of install.sh folded back | 2026.08.01 |
+| v0.4.0 | First complete end-to-end run on a real machine (44/44 before and after reboot, full §9 validation chain passed). FIXED: sysctl file renamed to `99-zz-hardening.conf` — the old name sorted before Ubuntu's `99-protect-links.conf` and was silently overridden. Added: panel CA issuing a certificate with `IP:<WG>.1` in the SAN for Cockpit and Portainer; `SSH_CLIENT_KEY` plus ready-to-paste login hints; password hashing rounds; legal banner. ShellCheck workflow tightened to `warning` | 2026.10.01 |
 | v0.3.0 | Disk-space headroom on `$HDD_MOUNT`: ext4 5% reserved-blocks plus a twice-daily 85%/95% mail alert (`disk-space-alert.sh`/`.timer`), percentage-based so it works unchanged across the transitional 500 GB NVMe and the eventual 4 TB HDD; two new `verify` checks; AIDE excludes and docs updated | 2026.08.01 |
 
 ---

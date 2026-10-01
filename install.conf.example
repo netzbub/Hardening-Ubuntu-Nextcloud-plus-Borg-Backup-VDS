@@ -12,6 +12,7 @@
 ADMIN_USER="johndoe"                 # sudo admin user / SSH login
 SSH_PORT="22022"                     # non-standard SSH port
 SSH_PUBKEY="ssh-ed25519 AAAA...replace-with-your-public-key... johndoe-vps"
+SSH_CLIENT_KEY="~/.ssh/id_ed25519"   # path to the PRIVATE key on YOUR machine; used only for printed login hints
 ADMIN_MAIL="admin@example.com"       # valid address for system mail
 HOSTNAME_FQDN="server.example.com"   # optional; leave empty to keep the provider hostname
 
