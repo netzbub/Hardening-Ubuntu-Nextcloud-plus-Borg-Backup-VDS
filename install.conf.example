@@ -38,3 +38,7 @@ SMTP_FROM="admin@example.com"
 # TIMEZONE="Europe/Berlin"
 # WAN_IF=""                          # empty = auto-detect the WAN interface
 # ENABLE_GRUB_HARDENING="no"         # "yes" only with a fresh provider backup
+# SWAPFILE_SIZE_GB="0"                # extra swap FILE in whole GB, on top of the
+                                     # swap the provider panel reserves at build
+                                     # time. 0 = none. Can be raised later without
+                                     # a rebuild; swap areas are additive.
