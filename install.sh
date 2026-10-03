@@ -59,6 +59,41 @@
 #            NC fail2ban filter matches real lines, IPv6 ban enters the whole /64,
 #            Borg restore round-trip byte-identical + borg check --verify-data OK.
 #
+# Rev. 8 (2026-10-03) - CIS/USG audit + migration rehearsal on the test server:
+#          - FIXED: sshd never showed a banner. /etc/issue.net was written but the
+#            'Banner' directive was missing, so the legal text was dead weight for the
+#            whole first install. Now set, and proven to appear on login.
+#          - FIXED: fs.suid_dumpable ran at 2 although the sysctl file says 0 - apport
+#            re-sets it on every boot, after sysctl. apport is now masked; the value
+#            holds across reboots. Same class of silent failure as the Rev.7 sysctl bug,
+#            different cause: a service, not file ordering.
+#          - FIXED: /etc/ssh/sshd_config.d/60-cloudimg-settings.conf shipped 644 - the
+#            chmod only covered our own drop-in. Now all of them.
+#          - NEW: GRUB menu password (ENABLE_GRUB_PASSWORD, default yes) with
+#            --unrestricted boot entries and a rollback if grub.cfg does not confirm
+#            both. Lowercase+digits so it is typeable at the provider's VNC console.
+#          - NEW: gen_secret uses pwgen -Byncs per the owner's standard, length +-4
+#            around 64, minus the shell/.env/URL-active characters.
+#          - NEW: CIS nachzuege - empty group wheel, INACTIVE=30, umask 027 in
+#            bash.bashrc, 0740 on user init files, explicit ufw loopback rules.
+#          - CHANGED: ext4 reserved blocks 1% on volumes >= 1 TB (5% of 4 TB parks
+#            200 GB), disk-space-alert thresholds per mountpoint (/ at 80%).
+#          - CHANGED: rsync is no longer purged in phase 12 - it is the migration tool.
+#            The daemon is masked instead.
+#          - verify: 44 -> 54 checks; SMTP_PASS is cleared automatically after phase 4.
+#          - Rehearsed end to end: /srv/hdd moved to a second volume with
+#            rsync -aHAX --numeric-ids, delta run 0 bytes, file lists identical,
+#            fstab swap, borg check --verify-data RC=0 afterwards, reboot clean.
+# Rev. 9 (2026-10-03) - swap:
+#          - NEW: vm.swappiness = 10 in 99-zz-hardening.conf. Ubuntu's default of 60
+#            pages out MariaDB and Redis while RAM is still free. On a 40 GB box swap
+#            is an emergency reserve for bursts (Chromium in the immo.flow run, borg
+#            compact, a Nextcloud image upgrade), never working memory.
+#          - NEW: optional extra swap FILE via SWAPFILE_SIZE_GB (default 0 = off).
+#            Swap areas are additive, so the panel-reserved swap can be topped up at
+#            any time without rebuilding the server.
+#          - verify 56 -> 58 (59 with SWAPFILE_SIZE_GB > 0).
+#
 # USAGE (as root on a fresh Ubuntu 24.04):
 #   ./install.sh preflight        # checks + apt update/upgrade
 #   ./install.sh phase1           # ... a single phase
@@ -140,6 +175,20 @@ WAN_IF="${WAN_IF:-}"                       # WAN interface (Docker/ufw bypass gu
 # a fresh provider backup: "yes" -> update-grub -> reboot -> check /proc/cmdline.
 ENABLE_GRUB_HARDENING="${ENABLE_GRUB_HARDENING:-no}"
 
+# GRUB menu password (phase5). Separate from the boot PARAMETERS above and far less
+# dangerous: it only protects editing the boot menu and the GRUB shell, while the
+# normal menu entries are marked --unrestricted so an unattended reboot still boots
+# without input. Default ON, but only ever enable it with a WORKING rescue console
+# (provider VNC) - proven on the test server 2026-10-03.
+ENABLE_GRUB_PASSWORD="${ENABLE_GRUB_PASSWORD:-yes}"
+
+# Optional ADDITIONAL swap FILE (phase5), whole GB. 0 = none.
+# Rev.9: the provider panel already reserves a swap area when the server is built
+# (8 GB on the production box). Linux takes swap files ON TOP of that, at any size,
+# at any time, without a rebuild - so this stays 0 unless the panel's swap proves
+# too small under load. See vm.swappiness in the sysctl block below.
+SWAPFILE_SIZE_GB="${SWAPFILE_SIZE_GB:-0}"
+
 # Fail early if the personal config was not loaded (skip when only showing usage):
 if [[ -n "${1:-}" && "${1:-}" != "usage" && -z "$ADMIN_USER" ]]; then
     echo "[ERROR] No install.conf found (ADMIN_USER empty). Run: cp install.conf.example install.conf, then edit it." >&2
@@ -200,11 +249,26 @@ append_once() {  # append_once <line> <file>  - idempotent append
     grep -qxF "$1" "$2" 2>/dev/null || echo "$1" >> "$2"
 }
 
-gen_secret() {  # gen_secret <name>  - create/read a secret, print it to stdout
+gen_secret() {  # gen_secret <name> [base-length]  - create/read a secret, print it to stdout
+    # Rev.8: pwgen -Byncs per the owner's standard (no ambiguous chars, digits,
+    # capitals, symbols, secure RNG). Length varies by +-4 around the base so not
+    # every secret in $SECRETS_DIR shares one length.
+    # Shell/.env/URL-active characters are excluded: these secrets travel through
+    # docker-compose .env files, DB connection URLs and shell here-docs, where a
+    # bare $ ` " ' \ ; & | < > would break the consumer, not the entropy budget
+    # (60+ chars from the remaining set is far beyond any brute-force reach).
     local f="$SECRETS_DIR/$1"
+    local base="${2:-64}"
     if [[ ! -f "$f" ]]; then
         install -d -m 700 "$SECRETS_DIR"
-        openssl rand -hex 24 > "$f"      # 48 chars, deterministic length
+        local n=$(( base - 4 + RANDOM % 9 ))
+        if command -v pwgen >/dev/null 2>&1; then
+            pwgen -Byncs --remove-chars='$`"'"'"'\\;&|<>' "$n" 1 > "$f" \
+                || die "pwgen failed for secret '$1'."
+        else
+            warn "pwgen missing - falling back to openssl for secret '$1'."
+            openssl rand -base64 96 | tr -d '\n=+/' | cut -c1-"$n" > "$f"
+        fi
         chmod 600 "$f"
     fi
     cat "$f"
@@ -248,7 +312,7 @@ EOF
     fi
     apt-get update -q
     apt-get full-upgrade -y -q
-    apt-get install -y -q openssl curl gnupg ca-certificates apt-transport-https
+    apt-get install -y -q openssl curl gnupg ca-certificates apt-transport-https pwgen
     log "Preflight done. If the kernel was updated: reboot after all phases are complete."
 }
 
@@ -332,8 +396,15 @@ PermitUserEnvironment no
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
 KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+# Rev.8 (CIS sshd_enable_warning_banner_net): without this line the legal text
+# written to /etc/issue.net in phase 5 is NEVER shown on an SSH login - the file
+# alone does nothing. Confirmed on the test server 2026-10-03: 'sshd -T' reported
+# 'banner none' through the whole first install run.
+Banner /etc/issue.net
 EOF
-    chmod 600 /etc/ssh/sshd_config /etc/ssh/sshd_config.d/10-hardening.conf
+    # Rev.8: 600 on EVERY drop-in, not just our own - Ubuntu's cloud image ships
+    # 60-cloudimg-settings.conf with 644 (CIS file_permissions_sshd_drop_in_config).
+    chmod 600 /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf
 
     # Rev.5 (S.1.f): clean up the contradictory Ubuntu default line in the main file.
     # The drop-in wins by include order, but USG/CIS audits would otherwise report
@@ -370,6 +441,11 @@ phase3() {
     if [[ "$KEEP22" == 1 ]]; then
         ufw limit 22/tcp comment 'SSH alt port - remove after phase2!'
     fi
+    # Rev.8 (CIS set_ufw_loopback_traffic): trust lo, reject spoofed loopback
+    # addresses arriving on a real interface.
+    ufw allow in on lo
+    ufw deny in from 127.0.0.0/8
+    ufw deny in from ::1
     ufw allow 80/tcp  comment 'HTTP ACME+Redirect'
     ufw allow 443/tcp comment 'HTTPS'
     ufw logging low
@@ -424,7 +500,19 @@ EOF
         if [[ -n "$SMTP_PASS" ]]; then
             install -m 600 /dev/null /etc/msmtp-pass
             printf '%s\n' "$SMTP_PASS" > /etc/msmtp-pass
-            warn "SMTP_PASS is now in /etc/msmtp-pass - CLEAR the variable in install.conf again!"
+            # Rev.8: the old warning was printed and overlooked - a mail password then sat
+            # in install.conf in the clear for days. The value is only ever needed for this
+            # one write, so clear it HERE instead of asking someone to remember.
+            # /etc/msmtp-pass (mode 600) is the only place it lives from now on.
+            if [[ -f "$INSTALL_CONF" ]] && grep -q '^SMTP_PASS=' "$INSTALL_CONF"; then
+                backup_file "$INSTALL_CONF"
+                sed -i "s|^SMTP_PASS=.*|SMTP_PASS=''|" "$INSTALL_CONF"
+                log "SMTP_PASS written to /etc/msmtp-pass and CLEARED in $INSTALL_CONF."
+                warn "Re-running phase4 needs SMTP_PASS entered again (it is in the password manager)."
+                warn "The COPY OF install.conf ON YOUR OWN MACHINE still holds the password - clear it there too."
+            else
+                warn "SMTP_PASS is now in /etc/msmtp-pass - CLEAR the variable in install.conf yourself!"
+            fi
         fi
         [[ -f /etc/msmtp-pass ]] || warn "/etc/msmtp-pass missing - create: install -m 600 /dev/null /etc/msmtp-pass && echo 'PASS' > /etc/msmtp-pass"
         cat > /etc/msmtprc <<EOF
@@ -516,6 +604,14 @@ fs.protected_hardlinks = 1
 fs.protected_symlinks = 1
 fs.protected_fifos = 2
 fs.protected_regular = 2
+# === Core dumps (Lynis KRNL-6000) ===
+# suid_dumpable is 0 above; this only makes the remaining dumps identifiable.
+kernel.core_uses_pid = 1
+# === Swap behaviour (Rev.9) ===
+# 10, not Ubuntu's default 60: with 40 GB RAM the kernel must not page out the
+# MariaDB buffer pool or Redis while physical memory is still free. Swap here is
+# an emergency reserve against the OOM killer, not a second tier of memory.
+vm.swappiness = 10
 EOF
     # Docker (phase 9) sets ip_forward itself; do NOT force it to 0 here
     # while Docker is planned. Without Docker: add net.ipv4.ip_forward = 0.
@@ -527,6 +623,48 @@ EOF
     fi
     sysctl --system >/dev/null || true
     log "sysctl applied."
+
+    # --- Rev.8: apport. THE reason fs.suid_dumpable kept reading 2 at runtime even
+    # though 99-zz-hardening.conf sets 0: the apport init script re-sets it to 2 on
+    # every boot, AFTER sysctl has run. Found on the test server 2026-10-03 via the
+    # CIS audit, which flagged both facts separately. Masking apport fixes both.
+    # A crash-report uploader has no business on a server anyway.
+    systemctl disable --now apport.service 2>/dev/null || true
+    systemctl mask apport.service 2>/dev/null || true
+    [[ -f /etc/default/apport ]] && sed -i 's/^enabled=.*/enabled=0/' /etc/default/apport
+    sysctl -w fs.suid_dumpable=0 >/dev/null 2>&1 || true
+
+    # --- Rev.8 (CIS ensure_pam_wheel_group_empty): /etc/pam.d/su already restricts
+    # su to group 'sudo'. CIS additionally wants an EMPTY group named 'wheel' to
+    # exist, so a future 'group=wheel' line can never match a real account. Creating
+    # it is free; su stays bound to group 'sudo', which is the practical equivalent.
+    getent group wheel >/dev/null || groupadd -r wheel
+
+    # --- Rev.8 (CIS account_disable_post_pw_expiration) ---
+    sed -i -E 's/^#?[[:space:]]*INACTIVE=.*/INACTIVE=30/' /etc/default/useradd
+
+    # --- Rev.8 (CIS accounts_umask_etc_bashrc): login.defs UMASK 027 covers login
+    # shells; /etc/bash.bashrc covers non-login interactive shells, /etc/profile.d
+    # the rest. All three, or the umask leaks back to 022 depending on how the shell
+    # was started.
+    append_once "umask 027" /etc/bash.bashrc
+    printf 'umask 027\n' > /etc/profile.d/99-umask.sh
+    chmod 644 /etc/profile.d/99-umask.sh
+
+    # --- Rev.8 (Lynis ACCT-9626): sysstat is installed as a dependency but ships
+    # ENABLED="false", so sar collects nothing. Performance history is what answers
+    # "when did the volume start filling up" and "was the load always like this" -
+    # exactly the questions that come up during the volume migration and after.
+    if [[ -f /etc/default/sysstat ]]; then
+        sed -i 's/^ENABLED=.*/ENABLED="true"/' /etc/default/sysstat
+        systemctl enable --now sysstat >/dev/null 2>&1 || warn "sysstat could not be enabled."
+    fi
+
+    # --- Rev.8 (CIS file_permission_user_init_files) ---
+    for f in /root/.bashrc /root/.profile /home/"$ADMIN_USER"/.bashrc \
+             /home/"$ADMIN_USER"/.profile /home/"$ADMIN_USER"/.bash_logout; do
+        [[ -f "$f" ]] && chmod 0740 "$f"
+    done
 
     # Block unneeded kernel modules (attack surface of exotic protocols).
     # Rev.5 (B1): install+blacklist per module, plus usb-storage. NO overlayfs (Docker!).
@@ -553,9 +691,82 @@ EOF
         log "GRUB boot-parameter hardening skipped (ENABLE_GRUB_HARDENING=no)."
     fi
 
+    # --- Rev.8: GRUB menu password (CIS grub2_password) ---
+    # Protects 'e' (edit entry) and 'c' (GRUB shell) in the boot menu - the route by
+    # which anyone with console access boots with init=/bin/bash and owns the machine.
+    # The password is lowercase+digits ON PURPOSE: it can only ever be typed at the
+    # provider's VNC console, which hands GRUB raw US key positions, so anything from
+    # a German keyboard arrives scrambled (test server 2026-10-03). Words beat entropy
+    # per character here - 4x6 lowercase + 4 digits is ~110 bits and always typeable.
+    if [[ "$ENABLE_GRUB_PASSWORD" == "yes" ]] && command -v grub-mkpasswd-pbkdf2 >/dev/null 2>&1; then
+        local gpw_file="$SECRETS_DIR/grub-password"
+        if [[ ! -f "$gpw_file" ]]; then
+            install -d -m 700 "$SECRETS_DIR"
+            local w1 w2 w3 w4
+            w1="$(pwgen -B -0 -A -1 6 1)"; w2="$(pwgen -B -0 -A -1 6 1)"
+            w3="$(pwgen -B -0 -A -1 6 1)"; w4="$(pwgen -B -0 -A -1 6 1)"
+            printf '%s-%s-%s-%s-%04d\n' "$w1" "$w2" "$w3" "$w4" \
+                "$(shuf -i 1000-9999 -n1)" > "$gpw_file"
+            chmod 600 "$gpw_file"
+        fi
+        local gpw ghash
+        gpw="$(cat "$gpw_file")"
+        ghash="$(printf '%s\n%s\n' "$gpw" "$gpw" | grub-mkpasswd-pbkdf2 2>/dev/null \
+            | awk '/pbkdf2\.sha512/{print $NF}')"
+        if [[ ${#ghash} -gt 100 ]]; then
+            # --unrestricted FIRST, then the password - in that order a failure of the
+            # sed below can never leave a machine that stops at a password prompt on
+            # an unattended reboot.
+            grep -q -- '--unrestricted' /etc/grub.d/10_linux \
+                || sed -i 's/^CLASS="/CLASS="--unrestricted /' /etc/grub.d/10_linux
+            if grep -q -- '--unrestricted' /etc/grub.d/10_linux; then
+                if ! grep -q 'password_pbkdf2 root' /etc/grub.d/40_custom; then
+                    printf 'set superusers="root"\npassword_pbkdf2 root %s\n' \
+                        "$ghash" >> /etc/grub.d/40_custom
+                fi
+                update-grub >/dev/null 2>&1 || warn "update-grub failed after the GRUB password."
+                if grep -q -- '--unrestricted' /boot/grub/grub.cfg \
+                   && grep -q 'password_pbkdf2' /boot/grub/grub.cfg; then
+                    log "GRUB menu password set; normal boot entries stay unrestricted."
+                    log "  Password file: $gpw_file  (put it in the password manager, it is NOT recoverable)"
+                else
+                    # Roll back rather than risk a machine that will not boot alone.
+                    sed -i '/^set superusers="root"$/d;/^password_pbkdf2 root /d' /etc/grub.d/40_custom
+                    update-grub >/dev/null 2>&1 || true
+                    warn "GRUB password rolled back: grub.cfg lacked --unrestricted or the hash."
+                fi
+            else
+                warn "Could not mark the GRUB entries --unrestricted - password NOT set (a reboot would stall at the prompt)."
+            fi
+        else
+            warn "grub-mkpasswd-pbkdf2 produced no usable hash - GRUB password NOT set."
+        fi
+    else
+        log "GRUB menu password skipped (ENABLE_GRUB_PASSWORD=no or grub-mkpasswd-pbkdf2 missing)."
+    fi
+
     # tmp dirs without exec (malware cannot start from temp):
     append_once "tmpfs /tmp     tmpfs defaults,nosuid,nodev,noexec 0 0" /etc/fstab
     append_once "tmpfs /dev/shm tmpfs defaults,nosuid,nodev,noexec 0 0" /etc/fstab
+
+    # --- Rev.9: optional ADDITIONAL swap file. The provider reserves a swap area at
+    # build time; Linux activates further swap files alongside it, so the total is the
+    # sum. SWAPFILE_SIZE_GB=0 means: rely on the panel's swap alone.
+    if [[ "$SWAPFILE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
+        if ! swapon --show=NAME --noheadings 2>/dev/null | grep -qx /swapfile; then
+            rm -f /swapfile
+            fallocate -l "${SWAPFILE_SIZE_GB}G" /swapfile 2>/dev/null \
+                || dd if=/dev/zero of=/swapfile bs=1M count=$(( SWAPFILE_SIZE_GB * 1024 )) status=none
+            chown root:root /swapfile
+            chmod 600 /swapfile
+            mkswap /swapfile >/dev/null
+            swapon /swapfile
+        fi
+        append_once "/swapfile none swap sw 0 0" /etc/fstab
+        log "Swap file /swapfile active (${SWAPFILE_SIZE_GB} GB), on top of the panel swap."
+    else
+        log "No extra swap file (SWAPFILE_SIZE_GB=0); using the provider-reserved swap only."
+    fi
     systemctl daemon-reload
 
     # Core dumps off (they can contain passwords/keys):
@@ -629,10 +840,21 @@ EOF
     else
         printf 'SHA_CRYPT_MAX_ROUNDS 65536\n' >> /etc/login.defs
     fi
-    # Legal banner before and after login (Lynis BANN-7126/7130):
+    # Legal banner before and after login (Lynis BANN-7126/7130).
+    # Rev.8: the first wording hit only FOUR of the key words Lynis looks for
+    # (access, authori, log, monitor) and the test demands FIVE, so both BANN checks
+    # stayed open through the first two runs - see /usr/share/lynis/include/tests_banners.
+    # The sentence added below is substantive, not keyword stuffing: it states that
+    # unauthorised use is prohibited and will be prosecuted, which is what makes a
+    # banner legally useful in the first place. Now at seven matches.
+    # No umlauts: the VNC console renders them wrong.
     cat > /etc/issue <<'BANNEREOF'
-Zugang nur fuer Berechtigte. Alle Zugriffe werden protokolliert.
-Authorised access only. All access is logged and monitored.
+Zugang nur fuer Berechtigte. Alle Zugriffe auf dieses System werden
+protokolliert und ueberwacht. Unbefugte Nutzung ist verboten und wird
+strafrechtlich verfolgt.
+
+Authorised access only. All access to this system is logged and monitored.
+Unauthorised use is prohibited and will be prosecuted.
 BANNEREOF
     cp /etc/issue /etc/issue.net
     chmod 644 /etc/issue /etc/issue.net
@@ -1105,7 +1327,17 @@ EOF
         hdd_dev="$(findmnt -no SOURCE "$HDD_MOUNT" 2>/dev/null || true)"
         hdd_fstype="$(findmnt -no FSTYPE "$HDD_MOUNT" 2>/dev/null || true)"
         if [[ -n "$hdd_dev" && "$hdd_fstype" == "ext4" ]]; then
-            tune2fs -m 5 "$hdd_dev" || warn "tune2fs -m 5 on $hdd_dev failed - check manually."
+            # Rev.8: 5% is right for a small volume and absurd for a large one - on the
+            # 4 TB HDD it parks 200 GB that only root may ever touch. The reserve exists
+            # to keep ext4 from fragmenting and to stop an unprivileged writer filling
+            # the volume to the last block; 1% of 4 TB (40 GB) does both. Threshold at
+            # 1 TB. The early-warning mail at 85% is the real guard rail.
+            local hdd_kb hdd_res
+            hdd_kb="$(df -Pk "$HDD_MOUNT" 2>/dev/null | awk 'NR==2{print $2}')"
+            if [[ -n "$hdd_kb" && "$hdd_kb" -ge 1000000000 ]]; then hdd_res=1; else hdd_res=5; fi
+            tune2fs -m "$hdd_res" "$hdd_dev" \
+                || warn "tune2fs -m $hdd_res on $hdd_dev failed - check manually."
+            log "ext4 reserved blocks on $HDD_MOUNT set to ${hdd_res}%."
         else
             warn "$HDD_MOUNT is not ext4 (fstype: ${hdd_fstype:-unknown}) - reserved-blocks headroom NOT applied, check manually."
         fi
@@ -1119,15 +1351,22 @@ EOF
     # (NC data + Borg repos) and / (system, DB, container images) - same script either way.
     cat > /usr/local/bin/disk-space-alert.sh <<'DSEOF'
 #!/bin/bash
-# Warn at 85%, critical at 95% (matches the ext4 5% root-reserve) - one mail per
-# newly-crossed threshold, not one per timer run. Usage: disk-space-alert.sh <mount> [<mount> ...]
+# One mail per newly-crossed threshold, not one per timer run.
+# Usage: disk-space-alert.sh <mount>[:<warn>[:<crit>]] ...
+# Rev.8: thresholds per mountpoint. The root filesystem needs the earlier warning:
+# Docker image layers, the journal, the apt cache and the NC DB dump can take it from
+# comfortable to full inside one upgrade, and it has no second volume to spill onto.
 set -euo pipefail
-WARN=85
-CRIT=95
+WARN_DEFAULT=85
+CRIT_DEFAULT=95
 STATE_DIR=/var/lib/disk-space-alert
 install -d "$STATE_DIR"
 
-for mnt in "$@"; do
+for spec in "$@"; do
+    mnt="${spec%%:*}"
+    rest="${spec#"$mnt"}"; rest="${rest#:}"
+    WARN="${rest%%:*}"; [[ -n "$WARN" ]] || WARN=$WARN_DEFAULT
+    CRIT="${rest#*:}";  [[ -n "$CRIT" && "$CRIT" != "$rest" ]] || CRIT=$CRIT_DEFAULT
     [[ -d "$mnt" ]] || continue
     state_file="$STATE_DIR/$(systemd-escape -p "$mnt").state"
     use=$(df -P "$mnt" 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5}')
@@ -1157,7 +1396,7 @@ Description=Disk space threshold alert (${HDD_MOUNT} and /)
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/disk-space-alert.sh ${HDD_MOUNT} /
+ExecStart=/usr/local/bin/disk-space-alert.sh ${HDD_MOUNT}:85:95 /:80:90
 EOF
     cat > /etc/systemd/system/disk-space-alert.timer <<'EOF'
 [Unit]
@@ -1596,7 +1835,12 @@ phase12() {
     fi
 
     # Legacy packages (rsync included on purpose - operator decision 2026-07-19; if needed: apt install rsync):
-    apt-get purge -y -q telnet inetutils-telnet ftp tnftp rsync 2>/dev/null || true
+    # Rev.8: rsync STAYS. It is the tool for the transitional-NVMe -> 4 TB HDD move
+    # and for every later volume change; purging it and reinstalling it under time
+    # pressure during a maintenance window is the wrong trade. The daemon is the risk,
+    # not the binary - so mask that instead (CIS service_rsyncd_disabled).
+    apt-get purge -y -q telnet inetutils-telnet ftp tnftp 2>/dev/null || true
+    systemctl mask rsync.service 2>/dev/null || true
     dpkg -l 2>/dev/null | awk '/^rc/{print $2}' | xargs -r dpkg --purge >/dev/null 2>&1 || true
     apt-get autoremove --purge -y -q 2>/dev/null || true
 
@@ -1657,7 +1901,12 @@ verify() {
     # SUBSHELL (...) - otherwise 'exit' via eval would end the whole verify (final review HIGH):
     chk "Portainer listens on ${PORTAINER_PORT}" "( for i in 1 2 3 4 5 6; do ss -tln | grep -q \":${PORTAINER_PORT} \" && exit 0; sleep 5; done; exit 1 )"
     chk "HDD mounted ($HDD_MOUNT)"         "mountpoint -q $HDD_MOUNT"
-    chk "HDD ext4 reserved blocks ~5%"     "( d=\$(findmnt -no SOURCE $HDD_MOUNT 2>/dev/null) && [[ -n \"\$d\" ]] && p=\$(tune2fs -l \"\$d\" 2>/dev/null | awk '/Reserved block count/{r=\$4} /Block count:/{b=\$3} END{if(b>0) printf \"%d\", (r*100/b)}') && [[ \"\$p\" -ge 4 && \"\$p\" -le 6 ]] )"
+    # Rev.8: 1% on volumes >= 1 TB, 5% below - so accept the whole band instead of
+    # pinning 5%, and only reject 0 (no reserve at all) or an absurdly large reserve.
+    # In PER MILLE, not percent: tune2fs rounds the reserved-block count DOWN, so at
+    # -m 1 the ratio comes out at 0.99998% and an integer percent calculation yields 0,
+    # failing a '>= 1' test. Measured on the test server 2026-10-03: 26214 of 2621440.
+    chk "HDD ext4 reserve 8-60 per mille" "( d=\$(findmnt -no SOURCE $HDD_MOUNT 2>/dev/null) && [[ -n \"\$d\" ]] && p=\$(tune2fs -l \"\$d\" 2>/dev/null | awk '/Reserved block count/{r=\$4} /Block count:/{b=\$3} END{if(b>0) printf \"%d\", (r*1000/b)}') && [[ \"\$p\" -ge 8 && \"\$p\" -le 60 ]] )"
     chk "Disk-space-alert timer active"    "systemctl is-active disk-space-alert.timer"
     chk "Borg path trigger active"         "systemctl is-active borg-backup.path"
     chk "Borg fallback timer active"       "systemctl is-active borg-backup.timer"
@@ -1673,6 +1922,27 @@ verify() {
     chk "ubuntu user removed"              "! id ubuntu"
     chk "AIDE DB present"                  "test -s /var/lib/aide/aide.db"
     chk "GRUB without apparmor boot param" "! grep -rq 'apparmor=1' /etc/default/grub.d/ 2>/dev/null"
+    # Rev.8 - the six findings from the CIS audit on the test server, 2026-10-03:
+    chk "sshd Banner active"               "sshd -T 2>/dev/null | grep -qi '^banner /etc/issue.net'"
+    chk "sshd drop-ins mode 600"           "! find /etc/ssh/sshd_config.d -name '*.conf' -perm /077 | grep -q ."
+    chk "fs.suid_dumpable=0 at runtime"    "[[ \"\$(sysctl -n fs.suid_dumpable)\" == 0 ]]"
+    chk "apport masked"                    "[[ \"\$(systemctl is-enabled apport 2>/dev/null)\" == masked ]]"
+    chk "group wheel exists and is empty"  "getent group wheel | grep -q ':\$'"
+    chk "useradd INACTIVE=30"              "grep -qE '^INACTIVE=30' /etc/default/useradd"
+    chk "umask 027 in bash.bashrc"         "grep -qE '^umask 027' /etc/bash.bashrc"
+    chk "banner hits >=5 Lynis keywords"   "( c=0; for w in audit access authori condition connect consent continu criminal enforce evidence forbidden intrusion law legal legislat log monitor owner penal policy policies privacy private prohibited prosecute record report restricted secure subject system terms warning; do grep -qi \"\$w\" /etc/issue && c=\$((c+1)); done; [[ \$c -ge 5 ]] )"
+    chk "sysstat collecting"               "grep -qE '^ENABLED=\"?true' /etc/default/sysstat"
+    # Rev.9 - swap:
+    chk "vm.swappiness=10"                 "[[ \"\$(sysctl -n vm.swappiness)\" == 10 ]]"
+    chk "swap area active"                 "[[ -n \"\$(swapon --show=NAME --noheadings 2>/dev/null)\" ]]"
+    if [[ "$SWAPFILE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
+        chk "swap file in fstab, mode 600" "grep -qE '^/swapfile[[:space:]]' /etc/fstab && [[ \"\$(stat -c %a /swapfile)\" == 600 ]]"
+    fi
+    if [[ "$ENABLE_GRUB_PASSWORD" == "yes" ]]; then
+        chk "GRUB password + unrestricted"  "grep -q 'password_pbkdf2' /boot/grub/grub.cfg && grep -q -- '--unrestricted' /boot/grub/grub.cfg"
+    fi
+    chk "SMTP_PASS cleared in install.conf" "! grep -qE \"^SMTP_PASS=['\\\"]?[^'\\\"[:space:]]\" \"$INSTALL_CONF\" 2>/dev/null"
+    chk "rsync present, daemon masked"     "command -v rsync >/dev/null && [[ \"\$(systemctl is-enabled rsync 2>/dev/null)\" != enabled ]]"
 
     echo "=== $ok OK, $fail open ==="
     echo "Final audit:  lynis audit system   (Lynis from the CISOfy repo, phase 4)"

@@ -1,6 +1,7 @@
 # Install Guide — Prepare · Run · Finish
 
-The operational, step-by-step companion to [`install.sh`](install.sh) (Rev. 5). It walks a
+The operational, step-by-step companion to [`install.sh`](install.sh) (Rev. 8, thirteen phases,
+56 verify checks). It walks a
 fresh Ubuntu 24.04 VDS/VPS from bare install to a hardened host running a private Nextcloud,
 with the admin panels reachable only through a WireGuard tunnel. Rescue anchor for every
 SSH change: the provider's noVNC console (independent of SSH). Note that some providers have
@@ -21,9 +22,12 @@ Hence three steps:
 2. **Run** — `bootstrap` (phases 0–2) → login test → `rest` (phases 3–12 + verify).
 3. **Finish** — Nextcloud stack + 2FA, Borg init, WireGuard client, reboot, Ubuntu Pro, external nmap.
 
-> **First-run exception.** The assembled Rev. 5 script has not yet been run end-to-end. The
-> very first real run on a new server should still be **phase by phase** (to catch any
-> assembly issue live). `bootstrap`/`rest` is the routine for afterwards.
+> **Proven end to end.** Rev. 7 ran all thirteen phases in sequence on a real machine on
+> 2026-10-01 with `verify` at 44/44 before and after the reboot, and the full mandatory
+> validation chain passed; Rev. 8 added a CIS/USG round and a rehearsed volume migration on
+> 2026-10-03. `bootstrap`/`rest` is therefore the normal route. Running phase by phase (2.2)
+> stays available and is still the better choice on a provider you have not used before,
+> where you want to see each phase land.
 
 ## Marking convention in this document
 
@@ -154,7 +158,8 @@ Fill in `install.conf`:
 | `NC_IMAGE_TAG` | current NC tag (1.5) | Phase 9 |
 | `WG_CLIENT_PUBKEY` | content of `~/.wireguard/wg-client.pub` (1.2) | Phase 8 |
 | `SMTP_HOST/PORT/USER/PASS/FROM` | SMTP access (1.6) | Phase 4 |
-| `ENABLE_GRUB_HARDENING` | `no` (default) | see Part 4.8 |
+| `ENABLE_GRUB_HARDENING` | `no` (default) | see Part 4.9 |
+| `ENABLE_GRUB_PASSWORD` | `yes` (default) | phase 5; see Part 4.9 |
 
 `[+ Info +]` Paste `SSH_PUBKEY` by copy-paste, never type it — one wrong character locks you
 out. Clear `SMTP_PASS` again after the run. `install.conf` is git-ignored and never uploaded.
@@ -231,7 +236,8 @@ rescue session. Then:
 ```
 /root/install.sh phase3
 /root/install.sh phase4
-/root/install.sh phase5      # GRUB boot params only if ENABLE_GRUB_HARDENING=yes (default no; Part 4.8)
+/root/install.sh phase5      # GRUB boot params only if ENABLE_GRUB_HARDENING=yes (default no; Part 4.9)
+                             # GRUB MENU password is separate and on by default (ENABLE_GRUB_PASSWORD)
 /root/install.sh phase6
 /root/install.sh phase7
 /root/install.sh phase8      # DNS must be set (1.4) before Phase 9
@@ -410,7 +416,30 @@ pro enable usg
 USG audit — do **not** blindly run `usg fix` (Docker/UFW/WireGuard conflicts; the deliberate
 CIS deviations are documented in the README).
 
-## 3.7 Mandatory external check
+## 3.7 Hand the secrets to the password manager
+
+`[ ! Do ! ]` Before the install session ends. The point of the script below is that no
+password passes through a chat window, a clipboard or a terminal transcript:
+
+```
+sudo tools/secrets-to-1pif.py
+```
+
+It reads `/root/install-secrets/` and writes ONE import file next to it,
+`install-secrets.1pif`: eleven items in 1Password Interchange Format — the six passwords,
+both Borg key exports, the WireGuard template and the two halves of the panel CA. The script
+prints the commands for moving it across and destroying it afterwards.
+
+> **WARNING — the file holds every password in clear text**, and after the transfer it exists
+> in three places: on the server, in the user's home on the server, and on your machine.
+> Destroy all three. The script ends with those exact commands; `shred -u` on the server,
+> `rm -P` on macOS. The handover is not finished until all three are gone.
+
+`[ ! Do ! ]` Two of these go on **paper** as well, because neither is recoverable and both
+are needed exactly when nothing else works: the admin password (without it the VNC console
+is useless on lock-out) and the GRUB password.
+
+## 3.8 Mandatory external check
 
 `[ ! Do ! ]` From a foreign network (phone hotspot), with the WireGuard tunnel DOWN:
 
@@ -433,14 +462,20 @@ Internal check:
 
 # PART 4 — REFERENCE / OPERATION
 
-## 4.1 Four passphrases — do not confuse
+## 4.1 Six secrets — do not confuse
 
 | # | Passphrase | Set by | Purpose / location |
 |---|---|---|---|
 | 1 | SSH key `vps_borg` | user (local) | protects the private backup SSH key |
 | 2 | SSH key `vps_trigger` | user (local) | protects the trigger SSH key |
 | 3 | Borg repo `repo-local` | user, at `borg init` (3.3d) | protects the repo key of the local-machine backup |
-| 4 | Borg repo `repo-server` | auto (script) | `/root/.borg-passphrase`; repo the server backs itself into. Still save it externally. |
+| 4 | Borg repo `repo-server` | auto (script) | `/root/install-secrets/borg-passphrase`, copied to `/root/.borg-passphrase` for the backup job. Repo the server backs itself into. Save it externally — without it AND the key export the backup is unreadable. |
+| 5 | Admin password | auto (script) | `/root/install-secrets/admin-user-password`. One password, three uses: `sudo`, the provider's VNC rescue console, and the Cockpit login. A typeable word sequence on purpose. **On paper too.** |
+| 6 | GRUB menu password | auto (script) | `/root/install-secrets/grub-password`. Protects editing the boot menu and the GRUB shell, not the boot itself. Lowercase and digits, because it is only ever typed at the VNC console. **Not recoverable.** |
+
+`[+ Info +]` Items 1 and 2 protect keys on your own machine, 3 and 4 protect backup data, 5
+and 6 are the two that matter when you are locked out — which is why both belong on paper
+and not only in the password manager that lives on the machine you cannot reach.
 
 ## 4.2 Borg key export + emergency restore
 
@@ -529,7 +564,40 @@ that folder may use the regular NC desktop client.
 
 `[+ Info +]` Check the current availability/terms before setting these up (not verified here).
 
-## 4.8 GRUB boot params + boot-loop warning
+## 4.8 Moving /srv/hdd to another volume
+
+Rehearsed end to end on 2026-10-03: delta run 0 bytes, file lists identical, `du -sb` equal
+to the byte, `borg check --verify-data` returning 0 afterwards, reboot clean. Use it when a
+transitional volume is replaced by the final disk.
+
+`[ ! Do ! ]` In this order, and do not skip steps 6 and 7 — they are the proof:
+
+```
+ 1. partition the target, mkfs.ext4, tune2fs -m 1   (1% is right from 1 TB up)
+ 2. mkdir /mnt/mig && mount
+ 3. systemctl stop borg-backup.timer borg-backup.path
+ 4. cd /srv/nextcloud && docker compose down
+ 5. rsync -aHAX --numeric-ids --stats /srv/hdd/ /mnt/mig/
+ 6. rsync again — expected: "Literal data: 0 bytes"
+ 7. diff the file lists of both sides, du -sb both sides
+ 8. umount both, fstab to the new UUID, systemctl daemon-reload, mount /srv/hdd
+ 9. borg check --verify-data on repo-server
+10. docker compose up -d && systemctl start borg-backup.timer borg-backup.path
+11. install.sh verify
+12. only then release the old volume
+```
+
+`[+ Info +]` Timing: the rehearsal moved 648 MB in 5.7 s between two loop images on one NVMe.
+On the real move the mechanical disk is the bottleneck, realistically 150–200 MB/s sequential,
+so 800 GB is about two hours and 2 TB about four. `rsync` stays installed since Rev. 8 for
+exactly this — phase 12 no longer purges it.
+
+`[+ Info +]` Headroom to keep free: **20 % on the root NVMe** (Docker image layers, journal,
+apt cache, kernels, the DB dump — and no second volume to spill onto) and **15 % on the data
+volume** (Borg needs room for new segments during `compact` and `prune`). The alert mails at
+80 % and 85 % respectively.
+
+## 4.9 GRUB boot params + boot-loop warning
 
 > **Incident:** a stacked, untested set of boot params (`apparmor=1 security=apparmor audit=1
 > audit_backlog_limit=8192`) once sent the VM into a boot loop; recovery only from the provider
@@ -547,13 +615,24 @@ is proven safe on the test VM. Enable ONLY deliberately:
 grep -o 'apparmor=1' /proc/cmdline || echo "ok - no apparmor boot param"
 ```
 
-**GRUB password** (separate, do not reuse root/admin) — only with a working rescue/VNC console:
+**GRUB password — the script does this itself** since Rev. 8, in phase 5, via
+`ENABLE_GRUB_PASSWORD` (default `yes`). Only ever leave it on with a working rescue/VNC
+console. What it does, and why that is safe:
 
 ```
-grub-mkpasswd-pbkdf2
-# put the hash into /etc/grub.d/40_custom, then:
-update-grub
+# 1) marks the normal menu entries --unrestricted in /etc/grub.d/10_linux
+#    -> an unattended reboot still boots with no input
+# 2) writes set superusers + password_pbkdf2 into /etc/grub.d/40_custom
+#    -> editing an entry and the GRUB shell need the password
+# 3) rolls both back out if grub.cfg does not afterwards confirm BOTH
+#    -> never leaves a machine that stalls at a password prompt
 ```
+
+The password lands in `/root/install-secrets/grub-password` and is **not recoverable** —
+put it in the password manager. It is lowercase letters and digits on purpose: it can only
+ever be typed at the provider's VNC console, which hands GRUB raw US key positions.
+
+To turn it off: `ENABLE_GRUB_PASSWORD="no"` in `install.conf`.
 
 ---
 
@@ -563,11 +642,36 @@ update-grub
 - **Admin password** (`/root/install-secrets/admin-user-password`) — save it before ending the session, otherwise the VNC console is useless on lock-out.
 - **DNS before Phase 9**, else Let's Encrypt rate limit.
 - **Cockpit login** = system user + Unix password (`passwd <user>`, must satisfy pwquality: 14 chars, 4 classes). No separate Cockpit password.
-- **noVNC keyboard:** `loadkeys us` for pasted paths (`/` → `-`); `loadkeys de` for typing.
+- **noVNC keyboard — `loadkeys` is the wrong lever.** Tested on 2026-10-03: changing the
+  console layout does not help, because the browser noVNC transmits key POSITIONS, not key
+  symbols, so a German Mac keyboard arrives scrambled whatever the console is set to. Two
+  things that do work: the noVNC panel's own copy-and-paste field, or the native macOS
+  Screen Sharing client, which transmits keysyms and therefore types correctly. Keep the
+  console layout at `us`.
 - **noVNC is one-way** (no copy-out). Fallback: screenshot → macOS Live Text OCR (double-check `l/1/I`, `O/0` for base64).
 - **Config files:** before appending a directive with `>>`, always `grep` whether it already exists (SSH takes the FIRST on duplicates — otherwise silently ineffective).
 - **Check the effective sshd value** (do not trust the file): `sshd -T | grep -i permitrootlogin`.
 - **Restricted Borg keys:** end hung SSH sessions cleanly with `exit`/`~.` (not Ctrl+C), and keep no more parallel sessions than needed (sporadic disconnects observed).
 - **AIDE init** (Phase 12) takes minutes at 100 % CPU — normal, do not abort.
-- **Remove the script after the run** (`shred -u`/`rm`) if secrets were entered; clear `SMTP_PASS`.
+- **`SMTP_PASS` clears itself** since Rev. 8: phase 4 writes it to `/etc/msmtp-pass` (mode
+  600) and then blanks the variable in the server's `install.conf`, keeping a backup of the
+  file. What it cannot reach is the copy of `install.conf` on your own machine — clear that
+  by hand. A re-run of phase 4 needs the value again from the password manager.
+- **Remove the script after the run** (`shred -u`/`rm`) if secrets were entered.
+- **A value in a config file is not a value at runtime.** `fs.suid_dumpable` read 0 in
+  `/etc/sysctl.d/99-zz-hardening.conf` and ran at 2, because apport re-sets it on every boot
+  AFTER sysctl. Check the running value, not the file. Same lesson, different shape:
+  `/etc/issue.net` existed for a whole install run without ever being shown, because the
+  sshd `Banner` directive was missing. For sshd, `sshd -T` is the only honest answer.
+- **sysctl files sort alphabetically across ALL directories.** `99-hardening.conf` sorted
+  before Ubuntu's `/usr/lib/sysctl.d/99-protect-links.conf` and lost to it silently. Hence
+  `99-zz-hardening.conf`. Check any new key against the system files.
+- **`/tmp` is tmpfs from phase 5 on**, i.e. RAM. Do not unpack anything sizeable there: on a
+  1.9 GB test machine one extraction took 902 of 960 MB and pushed 404 MB into swap.
+- **`TMOUT=900` is readonly from phase 5 on.** A root session dies after 15 idle minutes and
+  cannot be switched off. Run anything long with `nohup ... &` into a log file.
+- **`usg fix` is not run.** Of 38 CIS level-1 findings on the finished host, eleven were real
+  and are fixed; the other 27 are architecture conflicts (ufw instead of nftables, forwarding
+  for Docker and WireGuard, outbound allowed) or false positives. `usg fix` would enforce
+  against the architecture, not harden it.
 - **Provider console/backup** is the only lifeline on lock-out — never lose both access paths at once.

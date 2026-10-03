@@ -15,3 +15,6 @@ install.conf
 
 # Exclude personal, non-public notes
 Handover.md
+Handover_*.md
+# Provider correspondence incl. prices
+hostishere_server_ticket.md
