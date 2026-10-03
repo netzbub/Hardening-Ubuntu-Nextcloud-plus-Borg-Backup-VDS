@@ -42,3 +42,24 @@ SMTP_FROM="admin@example.com"
                                      # swap the provider panel reserves at build
                                      # time. 0 = none. Can be raised later without
                                      # a rebuild; swap areas are additive.
+
+# --- Optional phase 13: immo.flow (second PHP project with its own MariaDB) ---
+# ENABLE_IMMO="no"
+# IMMO_DOMAIN="immo.example.com"
+# IMMO_DIR="/srv/immo"
+# IMMO_USER="immo"
+# IMMO_DB="immo"
+# IMMO_DB_USER="immo-user"
+# IMMO_RUN_TIME="15:00"              # daily run, server timezone
+# ENABLE_IMMO_PLAYWRIGHT="no"        # ~400 MB disk, ~1 GB RAM while running
+
+# --- Optional phase 14: further static sites ---
+# ENABLE_EXTRA_SITES="no"
+# EXTRA_SITES="a.example.com b.example.com"
+
+# --- Optional phase 15: Nextcloud Talk High Performance Backend ---
+# ENABLE_TALK_HPB="no"
+# TURN_PORT="3478"
+# JANUS_RTP_MIN="20000"
+# JANUS_RTP_MAX="20100"
+# JANUS_IMAGE="canyan/janus-gateway:latest"   # UNVERIFIED - check before first run
