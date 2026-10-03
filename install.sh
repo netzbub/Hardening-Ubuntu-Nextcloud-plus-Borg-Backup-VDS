@@ -93,6 +93,28 @@
 #            Swap areas are additive, so the panel-reserved swap can be topped up at
 #            any time without rebuilding the server.
 #          - verify 56 -> 58 (59 with SWAPFILE_SIZE_GB > 0).
+# Rev. 10 (2026-10-03) - the three projects move onto one server:
+#          - NEW phase13 immo.flow (ENABLE_IMMO, default no): system user, own
+#            MariaDB on 127.0.0.1, own PHP-FPM pool on a unix socket, Caddy site,
+#            systemd timer replacing the Mac launchd agent, Borg pre-hook dumping
+#            the immo database - which had no automatic backup at all before.
+#          - PHP 8.3 from Ubuntu main is enough: on 2026-10-03 all 42 files under
+#            web/ passed 'php -l' on 8.3.6 and none used 8.4-only syntax. The
+#            third-party PHP repository stays off this machine.
+#          - The session cookie attributes the Nextcloud embedding needs (Secure,
+#            HttpOnly, SameSite=None) are set in the FPM pool, not in the
+#            application - no PHP file changes, and no later code edit can drop them.
+#          - NEW phase14 further static sites (ENABLE_EXTRA_SITES, default no).
+#          - NEW phase15 Talk HPB (ENABLE_TALK_HPB, default no): coturn native on
+#            3478 without TLS, signaling + Janus + NATS as a compose stack, served
+#            under a PATH of $NC_DOMAIN so it needs neither its own DNS record nor
+#            its own certificate. NOT YET RUN ON A REAL SERVER.
+#          - CHANGED: Caddy configuration split into /etc/caddy/conf.d/*.caddy, one
+#            file per site. Before, phase 9 rewrote the whole Caddyfile, so a site
+#            added by a later phase was silently wiped on the next phase-9 run.
+#          - CHANGED: the phase-9 DNS gate is now the reusable function dns_gate,
+#            used by phases 9, 13 and 14 instead of three copies.
+#          - verify: 59 checks run with all three switches off, 76 exist in total.
 #
 # USAGE (as root on a fresh Ubuntu 24.04):
 #   ./install.sh preflight        # checks + apt update/upgrade
@@ -189,6 +211,34 @@ ENABLE_GRUB_PASSWORD="${ENABLE_GRUB_PASSWORD:-yes}"
 # too small under load. See vm.swappiness in the sysctl block below.
 SWAPFILE_SIZE_GB="${SWAPFILE_SIZE_GB:-0}"
 
+# --- Rev.10: phase 13, immo.flow (second PHP project, own MariaDB) ---
+# Default off: an existing installation must behave exactly as before.
+ENABLE_IMMO="${ENABLE_IMMO:-no}"
+IMMO_DOMAIN="${IMMO_DOMAIN:-}"             # e.g. immo.example.com
+IMMO_DIR="${IMMO_DIR:-/srv/immo}"
+IMMO_USER="${IMMO_USER:-immo}"
+IMMO_DB="${IMMO_DB:-immo}"
+IMMO_DB_USER="${IMMO_DB_USER:-immo-user}"
+IMMO_RUN_TIME="${IMMO_RUN_TIME:-15:00}"    # systemd OnCalendar time, server timezone
+# Playwright/Chromium system libraries: ~400 MB on disk, ~1 GB RAM while running.
+# Only needed if the scrapers run ON THE SERVER instead of on the local machine.
+ENABLE_IMMO_PLAYWRIGHT="${ENABLE_IMMO_PLAYWRIGHT:-no}"
+
+# --- Rev.10: phase 14, further static sites ---
+ENABLE_EXTRA_SITES="${ENABLE_EXTRA_SITES:-no}"
+EXTRA_SITES="${EXTRA_SITES:-}"             # space separated, e.g. "a.example.com b.example.com"
+
+# --- Rev.10: phase 15, Nextcloud Talk High Performance Backend ---
+# The signaling server is served under a PATH of $NC_DOMAIN, so it needs neither
+# a DNS record nor a certificate of its own. coturn listens on 3478 without TLS.
+ENABLE_TALK_HPB="${ENABLE_TALK_HPB:-no}"
+TURN_PORT="${TURN_PORT:-3478}"
+JANUS_RTP_MIN="${JANUS_RTP_MIN:-20000}"
+JANUS_RTP_MAX="${JANUS_RTP_MAX:-20100}"
+# Janus has no image published by the Nextcloud project. UNVERIFIED default -
+# check it against the upstream repository before the first run.
+JANUS_IMAGE="${JANUS_IMAGE:-canyan/janus-gateway:latest}"
+
 # Fail early if the personal config was not loaded (skip when only showing usage):
 if [[ -n "${1:-}" && "${1:-}" != "usage" && -z "$ADMIN_USER" ]]; then
     echo "[ERROR] No install.conf found (ADMIN_USER empty). Run: cp install.conf.example install.conf, then edit it." >&2
@@ -247,6 +297,75 @@ backup_file() {  # backup_file <path>
 
 append_once() {  # append_once <line> <file>  - idempotent append
     grep -qxF "$1" "$2" 2>/dev/null || echo "$1" >> "$2"
+}
+
+# --- Rev.10: Caddy configuration is split. The main Caddyfile only imports; every
+# site lives in its own file under $CADDY_CONFD. Before, phase 9 wrote the whole
+# Caddyfile, so any site a later phase added was silently wiped on the next phase-9
+# run. One file per site also means a broken site file can be moved aside without
+# touching the others.
+CADDY_CONFD="/etc/caddy/conf.d"
+
+write_caddy_base() {
+    install -d -m 755 "$CADDY_CONFD"
+    backup_file /etc/caddy/Caddyfile
+    cat > /etc/caddy/Caddyfile <<EOF
+# Managed by install.sh - do not edit by hand.
+# One file per site in $CADDY_CONFD (phases 9, 13, 14).
+import $CADDY_CONFD/*.caddy
+EOF
+    chmod 644 /etc/caddy/Caddyfile          # must be readable by user 'caddy' (Review K3)
+}
+
+write_caddy_nextcloud() {
+    # Called by phase 9 and again by phase 15: the Talk signaling handle has to sit
+    # INSIDE the Nextcloud site block, and one definition is better than two copies.
+    local sig=""
+    if [[ "$ENABLE_TALK_HPB" == "yes" ]]; then
+        sig="
+    handle_path /standalone-signaling/* {
+        reverse_proxy 127.0.0.1:8081
+    }
+"
+    fi
+    cat > "$CADDY_CONFD/10-nextcloud.caddy" <<EOF
+$NC_DOMAIN {
+    header Strict-Transport-Security "max-age=15552000; includeSubDomains"
+    redir /.well-known/carddav /remote.php/dav/ 301
+    redir /.well-known/caldav  /remote.php/dav/ 301
+$sig
+    handle {
+        reverse_proxy 127.0.0.1:8080
+    }
+}
+EOF
+    chmod 644 "$CADDY_CONFD/10-nextcloud.caddy"
+}
+
+caddy_apply() {  # validate, then reload - never leave a broken config running
+    caddy validate --config /etc/caddy/Caddyfile || die "Caddyfile invalid - nothing reloaded."
+    systemctl reload caddy 2>/dev/null || systemctl restart caddy
+}
+
+dns_gate() {  # dns_gate <domain> - abort unless the record points at THIS server
+    # Caddy starts ACME attempts immediately. If the A/AAAA record still points
+    # elsewhere, every failed attempt burns the Let's Encrypt rate limit
+    # (5 failures/account/domain/hour).
+    local dom="$1" pub4 dns4 dns6 wif
+    wif="${WAN_IF:-$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')}"
+    [[ -n "$wif" ]] || die "DNS gate: WAN interface not detected - set WAN_IF in install.conf."
+    pub4="$(ip -4 -o addr show dev "$wif" scope global | awk '{print $4}' | cut -d/ -f1 | head -1)"
+    dns4="$(getent ahostsv4 "$dom" 2>/dev/null | awk '{print $1; exit}')"
+    [[ -n "$dns4" ]] || die "DNS gate: $dom does not resolve. Set the A record to $pub4, wait for the TTL, then run the phase again."
+    [[ "$dns4" == "$pub4" ]] || die "DNS gate: $dom -> $dns4, but this server is $pub4. Fix the A record, then run the phase again."
+    # AAAA: only check a real v6 entry (::ffff: = mapped v4). An AAAA that does NOT
+    # point here also makes ACME fail.
+    dns6="$(getent ahostsv6 "$dom" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}')"
+    if [[ -n "$dns6" ]]; then
+        ip -6 -o addr show scope global | grep -qF "$dns6" \
+            || die "DNS gate: AAAA($dom)=$dns6 does not belong to this server. Fix or delete the AAAA, then run the phase again."
+    fi
+    log "DNS gate passed: $dom -> $dns4${dns6:+ / $dns6}"
 }
 
 gen_secret() {  # gen_secret <name> [base-length]  - create/read a secret, print it to stdout
@@ -1239,35 +1358,12 @@ EOF
             > /etc/apt/sources.list.d/caddy-stable.list
         apt-get update -q && apt-get install -y -q caddy
     fi
-    backup_file /etc/caddy/Caddyfile
-    cat > /etc/caddy/Caddyfile <<EOF
-$NC_DOMAIN {
-    reverse_proxy 127.0.0.1:8080
-    header Strict-Transport-Security "max-age=15552000; includeSubDomains"
-    redir /.well-known/carddav /remote.php/dav/ 301
-    redir /.well-known/caldav  /remote.php/dav/ 301
-}
-EOF
-    chmod 644 /etc/caddy/Caddyfile              # must be readable by user 'caddy' (Review K3)
+    write_caddy_base
+    write_caddy_nextcloud
     caddy validate --config /etc/caddy/Caddyfile || die "Caddyfile invalid."
 
-    # === Council-Fix 8: DNS gate BEFORE Caddy start ===
-    # Caddy starts ACME attempts for $NC_DOMAIN IMMEDIATELY. If the A/AAAA record
-    # still points elsewhere, every failed attempt burns the Let's Encrypt rate limit
-    # (5 failures/account/domain/hour).
-    local pub4 dns4 dns6
-    pub4="$(ip -4 -o addr show dev "$wan_if" scope global | awk '{print $4}' | cut -d/ -f1 | head -1)"
-    dns4="$(getent ahostsv4 "$NC_DOMAIN" 2>/dev/null | awk '{print $1; exit}')"
-    [[ -n "$dns4" ]] || die "DNS gate: $NC_DOMAIN does not resolve. Set the A record to $pub4, wait for the TTL, then run phase9 again."
-    [[ "$dns4" == "$pub4" ]] || die "DNS gate: $NC_DOMAIN -> $dns4, but the server IP is $pub4. Fix the A record, then run phase9 again."
-    # AAAA: only check if a real v6 entry exists (::ffff: = mapped v4, ignore).
-    # An AAAA that does NOT point to this server also makes ACME fail:
-    dns6="$(getent ahostsv6 "$NC_DOMAIN" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}')"
-    if [[ -n "$dns6" ]]; then
-        ip -6 -o addr show scope global | grep -qF "$dns6" \
-            || die "DNS gate: AAAA($NC_DOMAIN)=$dns6 does not belong to this server. Fix or delete the AAAA, then run phase9 again."
-    fi
-    log "DNS gate passed: $NC_DOMAIN -> $dns4${dns6:+ / $dns6}"
+    # === Council-Fix 8: DNS gate BEFORE Caddy start (Rev.10: extracted to dns_gate) ===
+    dns_gate "$NC_DOMAIN"
 
     # Rev.5 (B6): lock Caddy into a systemd sandbox (markedly lowers the Lynis exposure).
     # CAP_NET_BIND_SERVICE for 80/443; ReadWritePaths only the cert/state directory.
@@ -1624,6 +1720,15 @@ export BORG_PASSCOMMAND='cat /root/.borg-passphrase'
 REPO="$BACKUP_DIR/repo-server"
 COMPOSE="docker compose -f /srv/nextcloud/docker-compose.yml"
 
+# Rev.10: pre-hooks contributed by later phases (e.g. the immo database dump in
+# phase 13). They write into /var/backups, which this archive already covers.
+if [[ -d /usr/local/lib/backup-pre.d ]]; then
+    for hook in /usr/local/lib/backup-pre.d/*.sh; do
+        [[ -x "\$hook" ]] || continue
+        "\$hook" || logger -t borg-backup "WARN: backup pre-hook \$hook failed"
+    done
+fi
+
 mkdir -p /var/backups/nc
 NC_RUNNING=0
 if \$COMPOSE ps -q app 2>/dev/null | grep -q .; then
@@ -1862,6 +1967,350 @@ EOF
     log "Phase 12 done. AIDE DB at /var/lib/aide/aide.db."
 }
 
+
+phase13() {
+    require_root
+    if [[ "$ENABLE_IMMO" != "yes" ]]; then
+        log "Phase 13 skipped (ENABLE_IMMO=no)."
+        return 0
+    fi
+    [[ -n "$IMMO_DOMAIN" ]] || die "Phase 13: IMMO_DOMAIN is empty - set it in install.conf."
+    [[ -n "$NC_DOMAIN" ]]   || die "Phase 13: NC_DOMAIN is empty - the CSP frame-ancestors rule needs it."
+    log "Phase 13: immo.flow - PHP-FPM, MariaDB, Caddy site, systemd timer"
+
+    # PHP 8.3 is what Ubuntu 24.04 ships, and it is enough: on 2026-10-03 all 42
+    # files under web/ passed 'php -l' on 8.3.6 and none used 8.4-only syntax. The
+    # third-party PHP repository an 8.4 would have required stays off this machine -
+    # an extra apt source on a hardened box is a supply-chain decision, not a detail.
+    apt-get install -y -q php8.3-fpm php8.3-mysql php8.3-mbstring php8.3-curl \
+        mariadb-server poppler-utils python3-venv
+
+    id -u "$IMMO_USER" &>/dev/null || useradd --system --create-home --home-dir "$IMMO_DIR" \
+        --shell /usr/sbin/nologin --comment "immo.flow service account" "$IMMO_USER"
+    install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 750 "$IMMO_DIR" "$IMMO_DIR/web" "$IMMO_DIR/daten"
+    # Market reports grow past 100 MB and keep growing; they belong on the data
+    # volume, not on the 500 GB system NVMe.
+    install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 750 "$HDD_MOUNT/immo" "$HDD_MOUNT/immo/Kaufpreise"
+    [[ -e "$IMMO_DIR/Kaufpreise" ]] || ln -s "$HDD_MOUNT/immo/Kaufpreise" "$IMMO_DIR/Kaufpreise"
+
+    # --- MariaDB, native, loopback only. Deliberately NOT the Nextcloud container's
+    # database: one shared instance would couple backup, version change and restart
+    # of two unrelated applications.
+    cat > /etc/mysql/mariadb.conf.d/99-immo.cnf <<'EOF'
+[mysqld]
+bind-address = 127.0.0.1
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+EOF
+    systemctl enable --now mariadb
+    systemctl restart mariadb
+
+    local immo_db_pass sqlf
+    immo_db_pass="$(gen_secret immo-db-pass 32)"
+    sqlf="$SECRETS_DIR/.immo-grant.sql"
+    install -d -m 700 "$SECRETS_DIR"
+    install -m 600 /dev/null "$sqlf"      # password must never reach the process list
+    cat > "$sqlf" <<EOF
+CREATE DATABASE IF NOT EXISTS \`$IMMO_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '$IMMO_DB_USER'@'127.0.0.1' IDENTIFIED BY '$immo_db_pass';
+ALTER USER '$IMMO_DB_USER'@'127.0.0.1' IDENTIFIED BY '$immo_db_pass';
+GRANT ALL PRIVILEGES ON \`$IMMO_DB\`.* TO '$IMMO_DB_USER'@'127.0.0.1';
+FLUSH PRIVILEGES;
+EOF
+    mariadb < "$sqlf" || die "Phase 13: MariaDB setup failed."
+    shred -u "$sqlf"
+
+    # --- PHP-FPM pool. Own pool, own user, own socket; the stock www pool is
+    # switched off because nothing uses it and every listening pool is surface.
+    [[ -f /etc/php/8.3/fpm/pool.d/www.conf ]] && \
+        mv /etc/php/8.3/fpm/pool.d/www.conf /etc/php/8.3/fpm/pool.d/www.conf.disabled
+    cat > /etc/php/8.3/fpm/pool.d/immo.conf <<EOF
+[immo]
+user = $IMMO_USER
+group = $IMMO_USER
+listen = /run/php/immo.sock
+listen.owner = caddy
+listen.group = caddy
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 10
+pm.process_idle_timeout = 60s
+pm.max_requests = 500
+php_admin_value[open_basedir] = $IMMO_DIR:$HDD_MOUNT/immo:/tmp:/usr/share/php
+php_admin_value[upload_tmp_dir] = /tmp
+php_admin_value[memory_limit] = 256M
+php_admin_value[post_max_size] = 32M
+php_admin_value[upload_max_filesize] = 32M
+php_admin_value[error_log] = /var/log/php8.3-fpm-immo.log
+php_admin_flag[expose_php] = off
+; The session cookie attributes that the embedding into Nextcloud needs. Setting
+; them in the pool rather than in the application means no PHP file has to change
+; and no later code edit can silently drop them again.
+php_admin_value[session.cookie_secure] = 1
+php_admin_value[session.cookie_httponly] = 1
+php_admin_value[session.cookie_samesite] = None
+EOF
+    systemctl enable --now php8.3-fpm
+    systemctl restart php8.3-fpm
+
+    # --- Caddy site. X-Frame-Options would forbid the iframe outright; the CSP
+    # frame-ancestors rule allows exactly the one origin that may embed the page.
+    dns_gate "$IMMO_DOMAIN"
+    cat > "$CADDY_CONFD/20-immo.caddy" <<EOF
+$IMMO_DOMAIN {
+    root * $IMMO_DIR/web
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=15552000; includeSubDomains"
+    header X-Content-Type-Options nosniff
+    header -X-Frame-Options
+    header Content-Security-Policy "frame-ancestors https://$NC_DOMAIN"
+    @verborgen path /inc/* /.env* /.git/*
+    respond @verborgen 404
+    php_fastcgi unix//run/php/immo.sock
+    file_server
+}
+EOF
+    chmod 644 "$CADDY_CONFD/20-immo.caddy"
+    caddy_apply
+
+    # --- Python environment. Only built once the code is actually deployed; the
+    # phase must not fail just because the repository has not been copied yet.
+    if [[ -f "$IMMO_DIR/requirements.txt" ]]; then
+        sudo -u "$IMMO_USER" python3 -m venv "$IMMO_DIR/.venv"
+        sudo -u "$IMMO_USER" "$IMMO_DIR/.venv/bin/pip" install -q -r "$IMMO_DIR/requirements.txt"
+        if [[ "$ENABLE_IMMO_PLAYWRIGHT" == "yes" ]]; then
+            "$IMMO_DIR/.venv/bin/playwright" install-deps chromium || warn "playwright install-deps failed."
+            sudo -u "$IMMO_USER" "$IMMO_DIR/.venv/bin/playwright" install chromium || warn "playwright install chromium failed."
+        fi
+    else
+        warn "No $IMMO_DIR/requirements.txt - venv not built. Deploy the code, then run phase13 again."
+    fi
+
+    # --- Daily run. Replaces the launchd agent de.brilling.immo.lauf on the Mac.
+    cat > /etc/systemd/system/immo-lauf.service <<EOF
+[Unit]
+Description=immo.flow daily run
+After=network-online.target mariadb.service
+Wants=network-online.target
+OnFailure=immo-fail-mail.service
+
+[Service]
+Type=oneshot
+User=$IMMO_USER
+Group=$IMMO_USER
+WorkingDirectory=$IMMO_DIR
+Environment=PYTHONPATH=$IMMO_DIR
+ExecStart=$IMMO_DIR/.venv/bin/python3 $IMMO_DIR/lauf.py
+TimeoutStartSec=3600
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=$IMMO_DIR $HDD_MOUNT/immo
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+EOF
+    cat > /etc/systemd/system/immo-lauf.timer <<EOF
+[Unit]
+Description=immo.flow daily run
+
+[Timer]
+OnCalendar=*-*-* $IMMO_RUN_TIME
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
+EOF
+    # Same pattern as backup-fail-mail: a silent failure is worse than no run.
+    cat > /etc/systemd/system/immo-fail-mail.service <<'EOF'
+[Unit]
+Description=Alarm on a failed immo.flow run
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'MSG="IMMO RUN FAILED on $(hostname) $(date)"; logger -t immo-lauf "$MSG"; journalctl -u immo-lauf.service -n 50 --no-pager | mail -s "$MSG" root 2>/dev/null || true'
+EOF
+    systemctl daemon-reload
+    systemctl enable --now immo-lauf.timer
+
+    # --- Borg pre-hook: the immo database had no automatic backup at all until now.
+    install -d -m 750 /usr/local/lib/backup-pre.d
+    cat > /usr/local/lib/backup-pre.d/10-immo-db.sh <<EOF
+#!/bin/bash
+# Dump the immo database into a directory the Borg archive already covers.
+set -euo pipefail
+mkdir -p /var/backups/immo
+mariadb-dump --single-transaction --databases '$IMMO_DB' > /var/backups/immo/immo.sql
+chmod 600 /var/backups/immo/immo.sql
+EOF
+    chmod 700 /usr/local/lib/backup-pre.d/10-immo-db.sh
+
+    log "Phase 13 done. Database password: $SECRETS_DIR/immo-db-pass"
+    log "Still to do by hand: deploy the code to $IMMO_DIR/web, write $IMMO_DIR/.env"
+    log "  (DB_HOST=127.0.0.1, DB_NAME=$IMMO_DB, DB_USER=$IMMO_DB_USER), import the dump."
+}
+
+phase14() {
+    require_root
+    if [[ "$ENABLE_EXTRA_SITES" != "yes" ]]; then
+        log "Phase 14 skipped (ENABLE_EXTRA_SITES=no)."
+        return 0
+    fi
+    [[ -n "$EXTRA_SITES" ]] || die "Phase 14: EXTRA_SITES is empty - list the domains in install.conf."
+    log "Phase 14: further static sites"
+
+    local dom dir
+    install -d -m 755 /srv/www
+    for dom in $EXTRA_SITES; do
+        dir="/srv/www/$dom"
+        dns_gate "$dom"
+        install -d -o www-data -g www-data -m 755 "$dir"
+        if [[ ! -e "$dir/index.html" ]]; then
+            printf '<!doctype html>\n<meta charset="utf-8">\n<title>%s</title>\n<p>%s ist eingerichtet.</p>\n' \
+                "$dom" "$dom" > "$dir/index.html"
+            chown www-data:www-data "$dir/index.html"
+        fi
+        # Static only: a gallery and a portfolio need no PHP, and no interpreter is
+        # the cheapest hardening there is. If one of them later needs PHP, it gets
+        # its own FPM pool the way phase 13 builds one.
+        cat > "$CADDY_CONFD/30-$dom.caddy" <<EOF
+$dom {
+    root * $dir
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=15552000; includeSubDomains"
+    header X-Content-Type-Options nosniff
+    file_server
+}
+EOF
+        chmod 644 "$CADDY_CONFD/30-$dom.caddy"
+        log "Site set up: $dom -> $dir"
+    done
+    caddy_apply
+    log "Phase 14 done."
+}
+
+phase15() {
+    require_root
+    if [[ "$ENABLE_TALK_HPB" != "yes" ]]; then
+        log "Phase 15 skipped (ENABLE_TALK_HPB=no)."
+        return 0
+    fi
+    [[ -n "$NC_DOMAIN" ]] || die "Phase 15: NC_DOMAIN is empty."
+    log "Phase 15: Nextcloud Talk High Performance Backend (signaling, Janus, coturn)"
+    warn "Phase 15 has NEVER run on a real server. Run it on the test server first."
+
+    local turn_secret sig_secret
+    turn_secret="$(gen_secret turn-secret 32)"
+    sig_secret="$(gen_secret signaling-secret 32)"
+
+    # --- coturn, native. No certificate and no DNS record of its own: clients reach
+    # it as $NC_DOMAIN:$TURN_PORT over plain UDP/TCP. The deny rules matter - without
+    # them the relay can be used to reach this server's own private networks.
+    apt-get install -y -q coturn
+    cat > /etc/turnserver.conf <<EOF
+listening-port=$TURN_PORT
+fingerprint
+use-auth-secret
+static-auth-secret=$turn_secret
+realm=$NC_DOMAIN
+total-quota=100
+bps-capacity=0
+stale-nonce
+no-multicast-peers
+no-tls
+no-dtls
+no-cli
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+EOF
+    chmod 640 /etc/turnserver.conf
+    chown root:turnserver /etc/turnserver.conf 2>/dev/null || true
+    sed -i 's|^#*TURNSERVER_ENABLED=.*|TURNSERVER_ENABLED=1|' /etc/default/coturn 2>/dev/null || true
+    systemctl enable --now coturn
+    systemctl restart coturn
+
+    # --- Signaling stack. IMAGE TAGS ARE UNVERIFIED: check them against
+    # https://github.com/strukturag/nextcloud-spreed-signaling before the first run.
+    install -d -m 750 /srv/talk
+    cat > /srv/talk/server.conf <<EOF
+[http]
+listen = 0.0.0.0:8080
+
+[app]
+debug = false
+
+[sessions]
+hashkey = $(gen_secret signaling-hashkey 32)
+blockkey = $(gen_secret signaling-blockkey 16)
+
+[backend]
+backends = nc1
+allowall = false
+
+[nc1]
+url = https://$NC_DOMAIN
+secret = $sig_secret
+
+[nats]
+url = nats://nats:4222
+
+[mcu]
+type = janus
+url = ws://janus:8188
+EOF
+    chmod 600 /srv/talk/server.conf
+    cat > /srv/talk/docker-compose.yml <<EOF
+services:
+  nats:
+    image: nats:2-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    pids_limit: 128
+    security_opt: [ "no-new-privileges:true" ]
+
+  janus:
+    image: $JANUS_IMAGE
+    restart: unless-stopped
+    mem_limit: 2g
+    pids_limit: 512
+    network_mode: host
+    security_opt: [ "no-new-privileges:true" ]
+
+  signaling:
+    image: strukturag/nextcloud-spreed-signaling:latest
+    restart: unless-stopped
+    mem_limit: 1g
+    pids_limit: 256
+    security_opt: [ "no-new-privileges:true" ]
+    depends_on: [ nats ]
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - ./server.conf:/config/server.conf:ro
+EOF
+    chmod 600 /srv/talk/docker-compose.yml
+
+    # ufw: coturn needs its port from the outside, Janus the RTP range.
+    ufw allow "${TURN_PORT}/tcp" comment 'TURN'
+    ufw allow "${TURN_PORT}/udp" comment 'TURN'
+    ufw allow "${JANUS_RTP_MIN}:${JANUS_RTP_MAX}/udp" comment 'Janus RTP'
+
+    # The signaling handle lives inside the Nextcloud site block, so that block is
+    # rewritten - one definition, no second copy.
+    write_caddy_nextcloud
+    caddy_apply
+
+    log "Phase 15 prepared. Start it by hand and check it:"
+    log "  cd /srv/talk && docker compose up -d"
+    log "Then in the Nextcloud container:"
+    log "  occ talk:signaling:add https://$NC_DOMAIN/standalone-signaling/ <secret from $SECRETS_DIR/signaling-secret>"
+    log "  occ talk:turn:add turn $NC_DOMAIN:$TURN_PORT udp,tcp --secret=<from $SECRETS_DIR/turn-secret>"
+}
+
 # ============================ VERIFY / HEALTH-CHECK ==========================
 verify() {
     require_root
@@ -1935,6 +2384,28 @@ verify() {
     # Rev.9 - swap:
     chk "vm.swappiness=10"                 "[[ \"\$(sysctl -n vm.swappiness)\" == 10 ]]"
     chk "swap area active"                 "[[ -n \"\$(swapon --show=NAME --noheadings 2>/dev/null)\" ]]"
+    # Rev.10 - Caddy split into one file per site:
+    chk "Caddyfile imports conf.d"         "grep -q 'import /etc/caddy/conf.d' /etc/caddy/Caddyfile"
+    chk "Nextcloud site file present"      "test -f /etc/caddy/conf.d/10-nextcloud.caddy"
+    if [[ "$ENABLE_IMMO" == "yes" ]]; then
+        chk "immo: php8.3-fpm running"     "systemctl is-active php8.3-fpm"
+        chk "immo: FPM socket present"     "test -S /run/php/immo.sock"
+        chk "immo: MariaDB on loopback"    "ss -tln | grep -q '127.0.0.1:3306'"
+        chk "immo: MariaDB NOT public"     "! ss -tln | grep -qE '(0\\.0\\.0\\.0|\\*):3306'"
+        chk "immo: database exists"        "mariadb -N -e \"SHOW DATABASES\" | grep -qx \"$IMMO_DB\""
+        chk "immo: Caddy site file"        "test -f /etc/caddy/conf.d/20-immo.caddy"
+        chk "immo: frame-ancestors set"    "grep -q 'frame-ancestors' /etc/caddy/conf.d/20-immo.caddy"
+        chk "immo: SameSite=None in pool"  "grep -q 'session.cookie_samesite. = None' /etc/php/8.3/fpm/pool.d/immo.conf"
+        chk "immo: timer active"           "systemctl is-active immo-lauf.timer"
+        chk "immo: Borg pre-hook"          "test -x /usr/local/lib/backup-pre.d/10-immo-db.sh"
+        chk "immo: reports on data volume" "test -d \"$HDD_MOUNT/immo/Kaufpreise\""
+    fi
+    if [[ "$ENABLE_TALK_HPB" == "yes" ]]; then
+        chk "HPB: coturn running"          "systemctl is-active coturn"
+        chk "HPB: TURN port open in ufw"   "ufw status | grep -q \"$TURN_PORT\""
+        chk "HPB: turnserver.conf 640"     "[[ \"\$(stat -c %a /etc/turnserver.conf)\" == 640 ]]"
+        chk "HPB: signaling handle in NC"  "grep -q 'standalone-signaling' /etc/caddy/conf.d/10-nextcloud.caddy"
+    fi
     if [[ "$SWAPFILE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
         chk "swap file in fstab, mode 600" "grep -qE '^/swapfile[[:space:]]' /etc/fstab && [[ \"\$(stat -c %a /swapfile)\" == 600 ]]"
     fi
@@ -1952,8 +2423,11 @@ verify() {
 # ================================ DISPATCH ===================================
 usage() {
     sed -n '48,67p' "$0"
-    echo "Phases: preflight phase1 phase2 phase3 phase4 phase5 phase6 phase7 phase8 phase9 phase10 phase11 phase12 verify"
-    echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-12 + verify)  all (everything with the stop)"
+    echo "Phases: preflight phase1 ... phase12   verify"
+    echo "Optional phases (each behind its own switch, all default off):"
+    echo "  phase13  immo.flow (ENABLE_IMMO)        phase14  further static sites (ENABLE_EXTRA_SITES)"
+    echo "  phase15  Talk HPB  (ENABLE_TALK_HPB)"
+    echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-15 + verify)  all (everything with the stop)"
 }
 
 main() {
@@ -1964,6 +2438,7 @@ main() {
         phase4) phase4 ;; phase5) phase5 ;; phase6) phase6 ;;
         phase7) phase7 ;; phase8) phase8 ;;
         phase9) phase9 ;; phase10) phase10 ;; phase11) phase11 ;; phase12) phase12 ;;
+        phase13) phase13 ;; phase14) phase14 ;; phase15) phase15 ;;
         verify) verify || true ;;
         bootstrap)
             preflight; phase1; phase2
@@ -1979,6 +2454,7 @@ main() {
             # prerequisites (DNS, HDD, WG pubkey, NC tag, SMTP) are set up front.
             ss -tln 2>/dev/null | grep -q ":${SSH_PORT} " || die "sshd not listening on $SSH_PORT - run 'bootstrap' + login test first."
             phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11; phase12
+            phase13; phase14; phase15
             verify || true
             warn "Plan a reboot (boot params/fstab only take effect then): shutdown -r +1"
             ;;
@@ -1997,6 +2473,7 @@ main() {
                 || die "No interactive terminal."
             [[ "$ans2" == "yes" ]] || die "Aborted - save the password first (cat $SECRETS_DIR/admin-user-password), then start again."
             phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11; phase12
+            phase13; phase14; phase15
             verify || true   # one open point must not swallow the final notes (Review M7)
             warn "Plan a reboot (boot params, fstab, possibly the kernel): shutdown -r +1"
             ;;

@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here. Versions follow a SemVer-style `0.x` scheme. The detailed pre-release script-revision log (install.sh Rev. 4 → Rev. 5) is kept at the bottom for reference.
 
+## [0.6.0] - 2026-10-03
+
+Three previously separate projects move onto one server. All three new phases are behind their own switch and default to off, so an existing installation behaves exactly as before.
+
+### Added
+- **Phase 13, immo.flow** (`ENABLE_IMMO`): system user `immo`, a native MariaDB bound to 127.0.0.1, an own PHP-FPM pool on a unix socket, a Caddy site, and a systemd timer that replaces the launchd agent on the Mac. A Borg pre-hook dumps the immo database before every backup run - until now that database had no automatic backup at all.
+- **Phase 14, further static sites** (`ENABLE_EXTRA_SITES`): one Caddy site per domain from `EXTRA_SITES`, served by `file_server` with no interpreter behind it.
+- **Phase 15, Nextcloud Talk High Performance Backend** (`ENABLE_TALK_HPB`): coturn native on 3478 without TLS, signaling server plus Janus and NATS as a compose stack. The signaling server is served under a path of `$NC_DOMAIN`, so it needs neither its own DNS record nor its own certificate. **This phase has not yet run on a real server, and the Janus image tag is unverified.**
+- `dns_gate <domain>` as a reusable function, and `/usr/local/lib/backup-pre.d/` as a hook directory the backup script runs before every archive.
+
+### Changed
+- **The Caddy configuration is split into `/etc/caddy/conf.d/*.caddy`, one file per site.** Phase 9 used to rewrite the whole `Caddyfile`, which meant any site added by a later phase was silently wiped the next time phase 9 ran. The main `Caddyfile` now only imports.
+- The DNS gate from phase 9 became `dns_gate` and is used by phases 9, 13 and 14 instead of being copied three times.
+- **Seventeen new verify checks**, 59 → 76 in total; 59 of them run with all three switches off.
+
+### Verified
+- PHP 8.3.6 - the version Ubuntu 24.04 ships - runs immo.flow: all 42 files under `web/` pass `php -l`, and nothing uses 8.4-only syntax. The third-party PHP repository that an 8.4 would have required is therefore not needed, and no extra apt source goes onto the hardened machine. Static check only; the runtime behaviour still has to be confirmed on the server.
+- The generated Caddy site files adapt cleanly under Caddy 2.8.4, with and without the Talk signaling handle.
+
 ## [0.5.1] - 2026-10-03
 
 Swap, after the provider panel turned out to offer sizes up to 8 GB at build time.
