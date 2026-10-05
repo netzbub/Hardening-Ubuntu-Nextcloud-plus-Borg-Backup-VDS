@@ -142,7 +142,10 @@
 #          - B2: two abort conditions after the install.conf gate (ADMIN_USER=root and
 #            SSH_PORT=22 each lock you out), and phase2 now demands the receipt file
 #            $SECRETS_DIR/admin-user-password.saved. Phase 2 switches the root login
-#            off; without the saved admin password the VNC console is useless.
+#            off; without the saved admin password the VNC console is useless. New
+#            password_gate() runs between phase1 and phase2 in 'bootstrap' and 'all':
+#            it shows the password on the terminal (never in $LOGFILE), asks, and writes
+#            the receipt. The old gate in 'all' asked only after phase2 and is gone.
 #          - B4: the immo timer check is conditional on the .venv now, otherwise verify
 #            reports a planned error (74 of 75 instead of 75 of 75).
 #          - B3 is a config change, not a code change: SWAPFILE_SIZE_GB="8" in
@@ -153,7 +156,11 @@
 #   ./install.sh phase1           # ... a single phase
 #   ./install.sh all              # all phases (stops after SSH hardening
 #                                        #  for the mandatory login test!)
-#   ./install.sh bootstrap        # preflight+phase1+phase2, ends at the login-test stop
+#   ./install.sh bootstrap        # preflight+phase1+phase2, ends at the login-test stop.
+#                                 # Needs an INTERACTIVE terminal: between phase1 and
+#                                 # phase2 it shows the admin password and asks for
+#                                 # confirmation. So run it in an open root session
+#                                 # (ssh -t), not as ssh hih-r './install.sh bootstrap'.
 #   ./install.sh rest             # phase3..phase12 + verify (AFTER a successful login test)
 #   ./install.sh verify           # health check
 #
@@ -2519,8 +2526,33 @@ verify() {
 }
 
 # ================================ DISPATCH ===================================
+# B2 (v0.6.3): the gate between phase1 and phase2. Phase 2 switches the root login off,
+# so the admin password has to be in the operator's hands - not merely on the disk -
+# before it runs. The password is printed to the TERMINAL only, never through log()/warn()
+# into $LOGFILE. The receipt file written here is what phase2 checks.
+password_gate() {
+    require_root
+    if [[ -f "$SECRETS_DIR/admin-user-password.saved" ]]; then
+        log "Admin password already confirmed as saved - gate passed."
+        return 0
+    fi
+    [[ -f "$SECRETS_DIR/admin-user-password" ]] || die "$SECRETS_DIR/admin-user-password missing - run phase1 first."
+    echo ""
+    warn "Admin password for $ADMIN_USER - into the password manager AND onto paper, now:"
+    echo "    $(cat "$SECRETS_DIR/admin-user-password")"
+    echo ""
+    warn "After phase 2 root can no longer log in. Without this password the VNC console is useless."
+    local ans3
+    read -r -p "Password stored in the password manager and on paper? Only then 'yes': " ans3 \
+        || die "No interactive terminal - run 'bootstrap' in an open root session, or: touch $SECRETS_DIR/admin-user-password.saved"
+    [[ "$ans3" == "yes" ]] || die "Aborted - save the password first, then start again (the phases are idempotent)."
+    : > "$SECRETS_DIR/admin-user-password.saved"
+    chmod 600 "$SECRETS_DIR/admin-user-password.saved"
+    log "Receipt written: $SECRETS_DIR/admin-user-password.saved"
+}
+
 usage() {
-    sed -n '48,67p' "$0"
+    sed -n '154,173p' "$0"
     echo "Phases: preflight phase1 ... phase12   verify"
     echo "Optional phases (each behind its own switch, all default off):"
     echo "  phase13  immo.flow (ENABLE_IMMO)        phase14  further static sites (ENABLE_EXTRA_SITES)"
@@ -2550,7 +2582,7 @@ main() {
             ;;
         verify) verify || true ;;
         bootstrap)
-            preflight; phase1; phase2
+            preflight; phase1; password_gate; phase2
             echo ""
             warn "STOP: now log in from a SECOND terminal:"
             warn "    $(login_cmd)"
@@ -2568,7 +2600,7 @@ main() {
             warn "Plan a reboot (boot params/fstab only take effect then): shutdown -r +1"
             ;;
         all)
-            preflight; phase1; phase2
+            preflight; phase1; password_gate; phase2
             # Mandatory login test - 'all' must not close SSH untested (Review K4):
             echo ""
             warn "STOP: now log in from a SECOND terminal:"
@@ -2576,11 +2608,8 @@ main() {
             read -r -p "Login in the second terminal successful? Only then type 'yes': " ans \
                 || die "No interactive terminal - 'all' needs input. Run the phases individually."
             [[ "$ans" == "yes" ]] || die "Aborted - test the SSH login first, then run './install.sh all' again (phases are idempotent)."
-            # Council-Fix 4: second gate - the admin password must be saved offline,
-            # otherwise the VNC console is useless on a later lock-out.
-            read -r -p "Admin password ($SECRETS_DIR/admin-user-password) saved offline? Only then 'yes': " ans2 \
-                || die "No interactive terminal."
-            [[ "$ans2" == "yes" ]] || die "Aborted - save the password first (cat $SECRETS_DIR/admin-user-password), then start again."
+            # Council-Fix 4 used to ask about the offline copy HERE, after phase2 - too
+            # late to prevent a lock-out. password_gate above does it before phase2.
             phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11; phase12
             phase13; phase14; phase15
             verify || true   # one open point must not swallow the final notes (Review M7)
