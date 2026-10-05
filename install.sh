@@ -115,6 +115,38 @@
 #          - CHANGED: the phase-9 DNS gate is now the reusable function dns_gate,
 #            used by phases 9, 13 and 14 instead of three copies.
 #          - verify: 59 checks run with all three switches off, 76 exist in total.
+#          - FIXED (2026-10-04, on the production server): verify reported random
+#            false negatives. The checks run under 'set -o pipefail', so every
+#            'producer | grep -q' check failed whenever the producer was still
+#            writing when grep -q exited - SIGPIPE, status 141, pipefail. It only
+#            showed up once the machine had enough listening sockets for ss to
+#            overflow the pipe buffer. chk() now evaluates in a subshell with
+#            pipefail off. Same class as the Rev.7 sysctl and Rev.8 banner bugs:
+#            the configuration was right, the check was wrong.
+#          - FIXED phase15, two faults found on first start (2026-10-04):
+#            1. The signaling image drops privileges to 'spreedbackend' (uid 850)
+#               in its entrypoint, so the root-owned 600 server.conf was
+#               unreadable and the container crash-looped. Now chown 850:850.
+#            2. Janus needs host networking for its RTP range, and a
+#               host-networked container is not resolvable by name from a bridge
+#               container - the signaling server died on "lookup janus ... server
+#               misbehaving". All three services now run on the host network with
+#               every port bound to the loopback. Mixing the two modes was the trap.
+#            Talk HPB is thereby verified end to end on a real server.
+# Rev. 11 (2026-10-05) = v0.6.3 - blockers B1 to B4 from Urteil-Team-A.md (2026-10-04):
+#          - B1: new gen_fixed() for the two signaling session keys. gen_secret varies
+#            every length by +-4, so blockkey (base 16) came out 12 to 20 characters,
+#            while the signaling server demands exactly 16, 24 or 32 bytes and otherwise
+#            aborts the start - eight of nine runs would have crash-looped. phase15 also
+#            drops an existing key of the wrong length so gen_fixed rebuilds it.
+#          - B2: two abort conditions after the install.conf gate (ADMIN_USER=root and
+#            SSH_PORT=22 each lock you out), and phase2 now demands the receipt file
+#            $SECRETS_DIR/admin-user-password.saved. Phase 2 switches the root login
+#            off; without the saved admin password the VNC console is useless.
+#          - B4: the immo timer check is conditional on the .venv now, otherwise verify
+#            reports a planned error (74 of 75 instead of 75 of 75).
+#          - B3 is a config change, not a code change: SWAPFILE_SIZE_GB="8" in
+#            install.conf, the build keeps swap 0.
 #
 # USAGE (as root on a fresh Ubuntu 24.04):
 #   ./install.sh preflight        # checks + apt update/upgrade
@@ -244,6 +276,10 @@ if [[ -n "${1:-}" && "${1:-}" != "usage" && -z "$ADMIN_USER" ]]; then
     echo "[ERROR] No install.conf found (ADMIN_USER empty). Run: cp install.conf.example install.conf, then edit it." >&2
     exit 1
 fi
+# B2: both values lock you out - phase2 writes PermitRootLogin no + AllowUsers $ADMIN_USER
+# and moves sshd off 22. Checked here, before the first phase touches the machine.
+[[ -z "${1:-}" || "${1:-}" == usage || "$ADMIN_USER" != root ]] || { echo "[ERROR] ADMIN_USER=root locks you out (PermitRootLogin no + AllowUsers root)." >&2; exit 1; }
+[[ -z "${1:-}" || "${1:-}" == usage || "$SSH_PORT" != 22 ]] || { echo "[ERROR] SSH_PORT=22 - choose a high port." >&2; exit 1; }
 # =============================================================================
 
 C_GRN='\033[0;32m'; C_RED='\033[0;31m'; C_YEL='\033[0;33m'; C_OFF='\033[0m'
@@ -393,6 +429,15 @@ gen_secret() {  # gen_secret <name> [base-length]  - create/read a secret, print
     cat "$f"
 }
 
+gen_fixed() {  # gen_fixed <name> <chars> - hex secret of exactly <chars> characters (= bytes in the config)
+    local f="$SECRETS_DIR/$1"
+    if [[ ! -f "$f" ]]; then
+        install -d -m 700 "$SECRETS_DIR"
+        ( umask 077; openssl rand -hex "$(( $2 / 2 ))" > "$f" ) || die "openssl failed for '$1'."
+    fi
+    cat "$f"
+}
+
 # ============================ PHASE 0: PREFLIGHT =============================
 preflight() {
     require_root
@@ -449,6 +494,8 @@ phase1() {
         # SSH lock-out -> the server is unrecoverable without a reinstall.
         warn "REQUIRED: show the password NOW and save it offline (password manager + paper):"
         warn "    cat $SECRETS_DIR/admin-user-password"
+        warn "Then confirm it with the receipt - phase2 refuses to start without it:"
+        warn "    touch $SECRETS_DIR/admin-user-password.saved"
         warn "Only then close the first session - the VNC console needs this password."
     fi
     usermod -aG sudo "$ADMIN_USER"
@@ -476,6 +523,10 @@ phase2() {
     require_root
     log "Phase 2: harden SSH (port $SSH_PORT, key-only, only $ADMIN_USER)"
     [[ -f "/home/$ADMIN_USER/.ssh/authorized_keys" ]] || die "Run phase1 first (authorized_keys missing)."
+    # B2: from here on root cannot log in any more. Without the admin password saved
+    # offline the provider VNC console is worthless on a lock-out, so the receipt is
+    # mandatory - deliberately a manual step, it cannot be faked by the script.
+    [[ -f "$SECRETS_DIR/admin-user-password.saved" ]] || die "Admin password not confirmed as saved. Read $SECRETS_DIR/admin-user-password in this root session, store it in 1Password and on paper, then: touch $SECRETS_DIR/admin-user-password.saved"
 
     # ufw already running (re-run/port change)? Open the new port BEFORE the sshd restart (Review M9):
     if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q 'Status: active'; then
@@ -2132,7 +2183,17 @@ Type=oneshot
 ExecStart=/bin/sh -c 'MSG="IMMO RUN FAILED on $(hostname) $(date)"; logger -t immo-lauf "$MSG"; journalctl -u immo-lauf.service -n 50 --no-pager | mail -s "$MSG" root 2>/dev/null || true'
 EOF
     systemctl daemon-reload
-    systemctl enable --now immo-lauf.timer
+    # Rev.10 FIX: only arm the timer once there is something to run. Without the
+    # venv the service dies with 203/EXEC at the next firing and sends a failure
+    # mail - every day, for a job that cannot work yet. Seen on the production
+    # server 2026-10-04, where phase 13 ran hours before the code was deployed.
+    if [[ -x "$IMMO_DIR/.venv/bin/python3" ]]; then
+        systemctl enable --now immo-lauf.timer
+    else
+        systemctl disable --now immo-lauf.timer 2>/dev/null || true
+        warn "immo-lauf.timer stays OFF - $IMMO_DIR/.venv is missing."
+        warn "Deploy the code, then: systemctl enable --now immo-lauf.timer"
+    fi
 
     # --- Borg pre-hook: the immo database had no automatic backup at all until now.
     install -d -m 750 /usr/local/lib/backup-pre.d
@@ -2200,6 +2261,19 @@ phase15() {
     log "Phase 15: Nextcloud Talk High Performance Backend (signaling, Janus, coturn)"
     warn "Phase 15 has NEVER run on a real server. Run it on the test server first."
 
+    # B1: keys written by the old gen_secret have a random length. The signaling server
+    # accepts exactly 16, 24 or 32 bytes for blockkey and aborts otherwise - drop a
+    # wrong-length key here so gen_fixed writes a new one below.
+    local sk sklen
+    for sk in signaling-hashkey:32 signaling-blockkey:16; do
+        [[ -f "$SECRETS_DIR/${sk%%:*}" ]] || continue
+        sklen="$(tr -d '\n' < "$SECRETS_DIR/${sk%%:*}" | wc -c | tr -d ' ')"
+        if [[ "$sklen" != "${sk##*:}" ]]; then
+            warn "Session key ${sk%%:*}: length $sklen instead of ${sk##*:} - regenerating."
+            rm -f "$SECRETS_DIR/${sk%%:*}"
+        fi
+    done
+
     local turn_secret sig_secret
     turn_secret="$(gen_secret turn-secret 32)"
     sig_secret="$(gen_secret signaling-secret 32)"
@@ -2238,14 +2312,14 @@ EOF
     install -d -m 750 /srv/talk
     cat > /srv/talk/server.conf <<EOF
 [http]
-listen = 0.0.0.0:8080
+listen = 127.0.0.1:8081
 
 [app]
 debug = false
 
 [sessions]
-hashkey = $(gen_secret signaling-hashkey 32)
-blockkey = $(gen_secret signaling-blockkey 16)
+hashkey = $(gen_fixed signaling-hashkey 32)
+blockkey = $(gen_fixed signaling-blockkey 16)
 
 [backend]
 backends = nc1
@@ -2256,20 +2330,36 @@ url = https://$NC_DOMAIN
 secret = $sig_secret
 
 [nats]
-url = nats://nats:4222
+url = nats://127.0.0.1:4222
 
 [mcu]
 type = janus
-url = ws://janus:8188
+url = ws://127.0.0.1:8188
 EOF
+    # Rev.10 FIX: the signaling image drops privileges to the user 'spreedbackend'
+    # (uid/gid 850) in its entrypoint. A root-owned 600 file is unreadable for it
+    # and the container crash-loops with
+    #   "Could not read configuration: open /config/server.conf: permission denied"
+    # Found on the production server 2026-10-04. 644 is not an option - the file
+    # carries the backend secret and the session keys.
+    chown 850:850 /srv/talk/server.conf
     chmod 600 /srv/talk/server.conf
     cat > /srv/talk/docker-compose.yml <<EOF
+# Rev.10 FIX: all three services run on the HOST network. Janus needs it anyway -
+# its RTP range would otherwise require one userland proxy per UDP port - and a
+# host-networked Janus is not resolvable by name from a bridge container, which
+# made the signaling server crash-loop on "lookup janus ... server misbehaving".
+# Mixing both modes is the trap; using one mode for all three removes it. Every
+# port is bound to the loopback, so nothing new is exposed: Caddy proxies to
+# 127.0.0.1:8081, and Janus on 8188 is covered by the ufw default deny.
 services:
   nats:
     image: nats:2-alpine
+    command: ["-a", "127.0.0.1", "-p", "4222"]
     restart: unless-stopped
     mem_limit: 256m
     pids_limit: 128
+    network_mode: host
     security_opt: [ "no-new-privileges:true" ]
 
   janus:
@@ -2285,10 +2375,9 @@ services:
     restart: unless-stopped
     mem_limit: 1g
     pids_limit: 256
+    network_mode: host
     security_opt: [ "no-new-privileges:true" ]
     depends_on: [ nats ]
-    ports:
-      - "127.0.0.1:8081:8080"
     volumes:
       - ./server.conf:/config/server.conf:ro
 EOF
@@ -2317,7 +2406,16 @@ verify() {
     echo "=== HEALTH CHECK $(date) ==="
     local ok=0 fail=0
     # no ((ok++)) - returns exit 1 at 0 and kills the script under set -e (Review K1)
-    chk() { if eval "$2" &>/dev/null; then echo "[OK]   $1"; ok=$((ok+1)); else echo "[MISSING] $1"; fail=$((fail+1)); fi; }
+    # Rev.10 FIX: the checks run under 'set -o pipefail'. A check of the form
+    # 'producer | grep -q PATTERN' then reports FAILURE even on a match: grep -q
+    # exits at the first hit, the producer gets SIGPIPE and ends with 141, and
+    # pipefail makes that the status of the whole pipeline. The failure is
+    # intermittent - it only appears once the producer writes more than fits in
+    # the pipe buffer, i.e. as the machine gains listening sockets and ufw rules.
+    # Found on the production server 2026-10-04: 'SSH listens on 64028' and
+    # 'Portainer listens on 9443' alternated as false negatives while both were
+    # demonstrably correct. The subshell keeps the change local to the check.
+    chk() { if ( set +o pipefail; eval "$2" ) &>/dev/null; then echo "[OK]   $1"; ok=$((ok+1)); else echo "[MISSING] $1"; fail=$((fail+1)); fi; }
 
     chk "SSH service active"               "systemctl is-active ssh"
     chk "SSH listens on $SSH_PORT"         "ss -tlnp | grep -q \":$SSH_PORT \""
@@ -2396,7 +2494,7 @@ verify() {
         chk "immo: Caddy site file"        "test -f /etc/caddy/conf.d/20-immo.caddy"
         chk "immo: frame-ancestors set"    "grep -q 'frame-ancestors' /etc/caddy/conf.d/20-immo.caddy"
         chk "immo: SameSite=None in pool"  "grep -q 'session.cookie_samesite. = None' /etc/php/8.3/fpm/pool.d/immo.conf"
-        chk "immo: timer active"           "systemctl is-active immo-lauf.timer"
+        chk "immo: timer active (or off, no venv)" "[[ ! -x \"$IMMO_DIR/.venv/bin/python3\" ]] || systemctl is-active immo-lauf.timer"
         chk "immo: Borg pre-hook"          "test -x /usr/local/lib/backup-pre.d/10-immo-db.sh"
         chk "immo: reports on data volume" "test -d \"$HDD_MOUNT/immo/Kaufpreise\""
     fi
@@ -2427,6 +2525,7 @@ usage() {
     echo "Optional phases (each behind its own switch, all default off):"
     echo "  phase13  immo.flow (ENABLE_IMMO)        phase14  further static sites (ENABLE_EXTRA_SITES)"
     echo "  phase15  Talk HPB  (ENABLE_TALK_HPB)"
+    echo "Maintenance: caddy-base  (rebuild Caddyfile + Nextcloud site after an upgrade to Rev.10)"
     echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-15 + verify)  all (everything with the stop)"
 }
 
@@ -2439,6 +2538,16 @@ main() {
         phase7) phase7 ;; phase8) phase8 ;;
         phase9) phase9 ;; phase10) phase10 ;; phase11) phase11 ;; phase12) phase12 ;;
         phase13) phase13 ;; phase14) phase14 ;; phase15) phase15 ;;
+        caddy-base)
+            # Rev.10: rebuild only the Caddy structure (main file + Nextcloud site).
+            # Needed on a server installed before Rev.10, whose Caddyfile is still
+            # the old monolithic one WITHOUT the conf.d import - without this, the
+            # site files written by phases 13 and 14 are never loaded.
+            require_root
+            [[ -n "$NC_DOMAIN" ]] || die "caddy-base: NC_DOMAIN is empty."
+            write_caddy_base; write_caddy_nextcloud; caddy_apply
+            log "Caddy structure rebuilt: /etc/caddy/Caddyfile imports $CADDY_CONFD/*.caddy"
+            ;;
         verify) verify || true ;;
         bootstrap)
             preflight; phase1; phase2
