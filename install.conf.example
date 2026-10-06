@@ -52,6 +52,15 @@ SMTP_FROM="admin@example.com"
 # IMMO_DB_USER="immo-user"
 # IMMO_RUN_TIME="15:00"              # daily run, server timezone
 # ENABLE_IMMO_PLAYWRIGHT="no"        # ~400 MB disk, ~1 GB RAM while running
+# --- mail RETRIEVAL for the daily run (phase 13). No inbound mail server on this box:
+#     no MX record, no SMTP acceptance - the mailbox stays at the provider.
+# IMAP_HOST="mail.example.com"
+# IMAP_PORT="993"                    # 993 = IMAP over TLS. NOT 995, that is POP3 over TLS.
+# IMAP_USER="mailbox@example.com"
+# IMAP_PASS=""                       # written ONCE to /srv/immo/.env (600), then cleared here
+# IMAP_ORDNER="INBOX"
+# IMMO_WEB_ENV="/etc/immo/web.env"   # env file for the PHP frontend, WITHOUT the IMAP password
+# IMMO_MAIL_FROM=""                  # sender of the "password forgotten" mails
 
 # --- Optional phase 14: further static sites ---
 # ENABLE_EXTRA_SITES="no"

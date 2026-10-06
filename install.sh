@@ -133,23 +133,77 @@
 #               misbehaving". All three services now run on the host network with
 #               every port bound to the loopback. Mixing the two modes was the trap.
 #            Talk HPB is thereby verified end to end on a real server.
-# Rev. 11 (2026-10-05) = v0.6.3 - blockers B1 to B4 from Urteil-Team-A.md (2026-10-04):
+# Rev. 11 (2026-10-05) = v0.6.3 - the four blockers from Urteil-Team-A.md plus the
+#          decisions of 2026-10-05:
 #          - B1: new gen_fixed() for the two signaling session keys. gen_secret varies
 #            every length by +-4, so blockkey (base 16) came out 12 to 20 characters,
 #            while the signaling server demands exactly 16, 24 or 32 bytes and otherwise
 #            aborts the start - eight of nine runs would have crash-looped. phase15 also
 #            drops an existing key of the wrong length so gen_fixed rebuilds it.
 #          - B2: two abort conditions after the install.conf gate (ADMIN_USER=root and
-#            SSH_PORT=22 each lock you out), and phase2 now demands the receipt file
-#            $SECRETS_DIR/admin-user-password.saved. Phase 2 switches the root login
-#            off; without the saved admin password the VNC console is useless. New
-#            password_gate() runs between phase1 and phase2 in 'bootstrap' and 'all':
-#            it shows the password on the terminal (never in $LOGFILE), asks, and writes
-#            the receipt. The old gate in 'all' asked only after phase2 and is gone.
-#          - B4: the immo timer check is conditional on the .venv now, otherwise verify
-#            reports a planned error (74 of 75 instead of 75 of 75).
-#          - B3 is a config change, not a code change: SWAPFILE_SIZE_GB="8" in
-#            install.conf, the build keeps swap 0.
+#            SSH_PORT=22 each lock you out). phase2 demands the receipt file
+#            $SECRETS_DIR/admin-user-password.saved, and the new password_gate() between
+#            phase1 and phase2 in 'bootstrap' and 'all' shows the password on the
+#            TERMINAL (never through log()/warn() into $LOGFILE), asks, and writes that
+#            receipt. The old gate in 'all' asked only after phase2 - too late.
+#          - B3 is a config change: SWAPFILE_SIZE_GB="8" in install.conf, panel swap 0.
+#          - B4: the immo timer check is conditional on the .venv being present.
+#          - CLOUD-INIT PATH: phase1 no longer ties the password to "user did not exist".
+#            On a machine built from userData the user is already there with a locked
+#            password and NOPASSWD sudo; phase1 now sets the password and removes the
+#            NOPASSWD rule. Before this, that path ended with a machine whose root login
+#            phase2 switches off while nobody can authenticate at the VNC console.
+#          - PORTAINER REMOVED (owner decision 2026-10-05). It mounted
+#            /var/run/docker.sock, which is root on the host for whoever reaches the UI,
+#            and apt - not a container panel - is what adds software here. phase12
+#            removes container, volume and image left over from an earlier run; the
+#            verify check is replaced by one that asserts the container is gone.
+#          - Panel CA: nameConstraints on the WireGuard subnet and the server's own FQDN,
+#            so an imported private root cannot vouch for any other name. Lifetimes
+#            3650/800 -> 1825/397 days, automatic reissue of the leaf 30 days before it
+#            expires, and the chain is verified with 'openssl verify' after signing.
+#          - Cockpit: IdleTimeout=15 (minutes, cockpit.conf(5) [Session]), banner, and
+#            root written into /etc/cockpit/disallowed-users explicitly. No TOTP - the
+#            panel is reachable only inside the tunnel, key-only, behind ufw.
+#          - BORG: the exclude was the whole of $HDD_MOUNT, which silently left
+#            $HDD_MOUNT/immo - the market reports, which exist nowhere else - out of
+#            every archive. Now only $BACKUP_DIR (the repos) and $NCDATA_DIR (blobs that
+#            are a copy of what the Mac syncs) are excluded.
+#          - phase13 writes both env files: $IMMO_DIR/.env (600, immo) with the database
+#            and the IMAP values, and $IMMO_WEB_ENV (640 root:immo) with the database and
+#            the frontend keys but NO IMAP password, handed to PHP through
+#            env[IMMO_WEB_ENV] in the pool. IMAP_PORT defaults to 993 - 995 is POP3.
+#            New helper env_set() rewrites single keys without touching other lines.
+#          - install.conf is no longer copied before SMTP_PASS is cleared: on 2026-10-04
+#            that left install.conf.bak.<timestamp> with the password in the clear.
+#            Existing backups are shredded, and verify fails if one is left.
+#          - Lynis: new target 'lynis' and an automatic run at the end of 'rest'/'all',
+#            writing $TESTS_DIR/30-lynis.log. Until now the audit was a line in the
+#            closing notes and its output was lost.
+#          - usage() printed the wrong block of this header (sed -n '48,67p', the change
+#            history). Corrected and checked against the actual output.
+#          - verify: 86 checks under silo's switches (64 unconditional, 16 immo, 4 Talk HPB,
+#            1 GRUB password, 1 swap file; counted by two independent reviews on
+#            2026-10-06). The 'verify' at the end of 'rest' runs 66, before the phase
+#            13-15 switches are appended.
+# Rev. 12 (2026-10-06) = v0.6.4 - findings of the 2x2 review before the cloud-init rebuild:
+#          - umask 022 at the top: after phase 5, sudo inherits UMASK 027 via pam_umask and
+#            the phase-14 placeholder pages came out 640 - Caddy answered 403.
+#          - password_gate checks for a real terminal BEFORE showing the password, prints
+#            it to /dev/tty only, reads from /dev/tty with -t 3600 (TMOUT=900 is inherited).
+#          - phase8: the client template with the preshared key is no longer tee'd into the
+#            run log; a newly generated PSK is announced (the tunnel is down until the
+#            client has it).
+#          - phase10: an existing repo-server that does not open with the current passphrase
+#            aborts with instructions instead of leaving every backup failing silently.
+#          - phase13: caddy joins group immo (static files and try_files answered 403);
+#            chown -R of $HDD_MOUNT/immo (the volume survives a rebuild, the uid may not);
+#            IMAP_PASS values a .env reader misreads are refused.
+#          - dns_gate: '|| true' on the getent pipes - an unresolvable name ended the script
+#            silently under pipefail. lynis_audit: same for the grep.
+#          - phase3/'rest': ss filter instead of 'ss | grep -q' (SIGPIPE under pipefail).
+#          - phase2 removes sshd drop-ins and the ssh.socket override of older userData drafts.
+#          - preflight waits for cloud-init and sets a 600 s dpkg lock timeout.
 #
 # USAGE (as root on a fresh Ubuntu 24.04):
 #   ./install.sh preflight        # checks + apt update/upgrade
@@ -161,12 +215,16 @@
 #                                 # phase2 it shows the admin password and asks for
 #                                 # confirmation. So run it in an open root session
 #                                 # (ssh -t), not as ssh hih-r './install.sh bootstrap'.
-#   ./install.sh rest             # phase3..phase12 + verify (AFTER a successful login test)
+#   ./install.sh rest             # phase3..phase15 + verify + lynis (AFTER a successful login test)
 #   ./install.sh verify           # health check
 #
 # 3-STEP ROUTINE (after the prerequisites are front-loaded: DNS, HDD, WG pubkey,
 # NC tag, SMTP, SSH pubkey): 'bootstrap' -> test the login in a 2nd terminal -> 'rest'.
-# FIRST RUN on a new server still phase by phase (catch Redis/Portainer live).
+# CLOUD-INIT PATH (v0.6.3): if userData already created the admin user and moved sshd to
+# the high port, run 'bootstrap' anyway. phase1 then only does the follow-up work - set
+# the admin password, drop the NOPASSWD rule - and phase2 replaces the minimal sshd
+# drop-in with the full hardened configuration. Both phases are idempotent.
+# FIRST RUN on a new server still phase by phase (catch Redis/Janus live).
 #
 # RECOMMENDATION: run phases individually; after phase2 (SSH) you MUST test the
 # login in a SECOND terminal before closing the old session!
@@ -178,6 +236,10 @@
 # =============================================================================
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive   # applies to ALL phases (Review H4)
+# Rev.12: sudo inherits umask 027 via pam_umask once phase 5 has set UMASK 027 in
+# login.defs. Files Caddy or MariaDB must read then came out 640 (403 on the phase-14
+# sites). Every private file in this script gets its own explicit mode, so 022 is safe.
+umask 022
 
 # ============================ CONFIGURATION ==================================
 # Personal / deployment-specific values are NOT stored in this script (it lives in a
@@ -218,9 +280,6 @@ SMTP_USER="${SMTP_USER:-}"                 # SMTP login (often the full address)
 SMTP_PASS="${SMTP_PASS:-}"                 # only for a ONE-TIME write to /etc/msmtp-pass (600); then clear it again
 SMTP_FROM="${SMTP_FROM:-}"                 # sender address
 
-# --- Portainer (phase 11) ---
-PORTAINER_PORT="${PORTAINER_PORT:-9443}"
-
 # --- HDD / Borg backup on the server HDD (phase 9+10) ---
 HDD_MOUNT="${HDD_MOUNT:-/srv/hdd}"         # 4 TB HDD mount point
 NCDATA_DIR="${HDD_MOUNT}/ncdata"           # Nextcloud data dir (blobs, ~1 TB)
@@ -230,6 +289,7 @@ BACKUP_DIR="${HDD_MOUNT}/backup"           # Borg repos: repo-server + repo-loca
 TIMEZONE="${TIMEZONE:-Europe/Berlin}"
 SECRETS_DIR="${SECRETS_DIR:-/root/install-secrets}"
 LOGFILE="${LOGFILE:-/var/log/harden-install.log}"
+TESTS_DIR="${TESTS_DIR:-/root/tests}"   # run protocols (01-rest.log, 30-lynis.log, ...)
 WAN_IF="${WAN_IF:-}"                       # WAN interface (Docker/ufw bypass guard, phase 9); empty = auto-detect
 # GRUB boot-parameter hardening (phase5). Default OFF: boot params have the largest blast
 # radius and some providers have no rescue/ISO, only the provider backup. Enable ONLY with
@@ -262,6 +322,16 @@ IMMO_RUN_TIME="${IMMO_RUN_TIME:-15:00}"    # systemd OnCalendar time, server tim
 # Playwright/Chromium system libraries: ~400 MB on disk, ~1 GB RAM while running.
 # Only needed if the scrapers run ON THE SERVER instead of on the local machine.
 ENABLE_IMMO_PLAYWRIGHT="${ENABLE_IMMO_PLAYWRIGHT:-no}"
+# Mail RETRIEVAL for the daily immo run (phase 13). silo runs no inbound mail server:
+# no MX record, no SMTP acceptance, no spam filtering - the mailbox stays at the provider
+# and the run fetches from it over IMAP.
+IMAP_HOST="${IMAP_HOST:-}"                 # e.g. mail.example.com
+IMAP_PORT="${IMAP_PORT:-993}"              # 993 = IMAP over TLS. NOT 995 - that is POP3 over TLS.
+IMAP_USER="${IMAP_USER:-}"                 # the mailbox the run reads
+IMAP_PASS="${IMAP_PASS:-}"                 # ONE-TIME write to $IMMO_DIR/.env (600), then cleared here
+IMAP_ORDNER="${IMAP_ORDNER:-INBOX}"
+IMMO_WEB_ENV="${IMMO_WEB_ENV:-/etc/immo/web.env}"   # env file for the PHP frontend, WITHOUT the IMAP password
+IMMO_MAIL_FROM="${IMMO_MAIL_FROM:-}"       # sender of the "password forgotten" mails
 
 # --- Rev.10: phase 14, further static sites ---
 ENABLE_EXTRA_SITES="${ENABLE_EXTRA_SITES:-no}"
@@ -338,6 +408,18 @@ backup_file() {  # backup_file <path>
     return 0
 }
 
+env_set() {  # env_set <file> <key> <value> - set or add KEY=value, keep every other line
+    # Rewritten instead of sed-replaced on purpose: a password may contain any of sed's
+    # delimiters and metacharacters. Managed keys move to the end of the file, unmanaged
+    # lines (deployed by the application) survive untouched.
+    local f="$1" k="$2" v="$3" tmp
+    tmp="$(umask 077; mktemp)" || die "mktemp failed."
+    if [[ -f "$f" ]]; then grep -v "^${k}=" "$f" > "$tmp" || true; fi
+    printf '%s=%s\n' "$k" "$v" >> "$tmp"
+    cat "$tmp" > "$f"          # keeps owner and mode of an existing $f
+    rm -f "$tmp"
+}
+
 append_once() {  # append_once <line> <file>  - idempotent append
     grep -qxF "$1" "$2" 2>/dev/null || echo "$1" >> "$2"
 }
@@ -397,13 +479,15 @@ dns_gate() {  # dns_gate <domain> - abort unless the record points at THIS serve
     local dom="$1" pub4 dns4 dns6 wif
     wif="${WAN_IF:-$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')}"
     [[ -n "$wif" ]] || die "DNS gate: WAN interface not detected - set WAN_IF in install.conf."
-    pub4="$(ip -4 -o addr show dev "$wif" scope global | awk '{print $4}' | cut -d/ -f1 | head -1)"
-    dns4="$(getent ahostsv4 "$dom" 2>/dev/null | awk '{print $1; exit}')"
+    # Rev.12: '|| true' - under pipefail a name that does not resolve ended the script
+    # silently (getent rc 2) before the message below was reached.
+    pub4="$(ip -4 -o addr show dev "$wif" scope global | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
+    dns4="$(getent ahostsv4 "$dom" 2>/dev/null | awk '{print $1; exit}' || true)"
     [[ -n "$dns4" ]] || die "DNS gate: $dom does not resolve. Set the A record to $pub4, wait for the TTL, then run the phase again."
     [[ "$dns4" == "$pub4" ]] || die "DNS gate: $dom -> $dns4, but this server is $pub4. Fix the A record, then run the phase again."
     # AAAA: only check a real v6 entry (::ffff: = mapped v4). An AAAA that does NOT
     # point here also makes ACME fail.
-    dns6="$(getent ahostsv6 "$dom" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}')"
+    dns6="$(getent ahostsv6 "$dom" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}' || true)"
     if [[ -n "$dns6" ]]; then
         ip -6 -o addr show scope global | grep -qF "$dns6" \
             || die "DNS gate: AAAA($dom)=$dns6 does not belong to this server. Fix or delete the AAAA, then run the phase again."
@@ -481,6 +565,9 @@ EOF
         fi
         log "Hostname set: $HOSTNAME_FQDN"
     fi
+    # Rev.12: right after a rebuild cloud-init and apt-daily still hold the dpkg lock.
+    if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait >/dev/null 2>&1 || true; fi
+    printf 'DPkg::Lock::Timeout "600";\n' > /etc/apt/apt.conf.d/99-lock-timeout
     apt-get update -q
     apt-get full-upgrade -y -q
     apt-get install -y -q openssl curl gnupg ca-certificates apt-transport-https pwgen
@@ -493,9 +580,21 @@ phase1() {
     log "Phase 1: user $ADMIN_USER + sudo"
     if ! id "$ADMIN_USER" &>/dev/null; then
         adduser --disabled-password --gecos "" "$ADMIN_USER"
+    fi
+
+    # v0.6.3, the cloud-init path: on a machine built from userData the user already
+    # EXISTS - created with a locked password and NOPASSWD sudo so the bootstrap can
+    # run unattended. Before v0.6.3 this block was inside the "user does not exist"
+    # branch, so on that path no password was ever set: phase2 would switch off the
+    # root login while nobody could authenticate at the VNC console, and sudo would
+    # stay password-free for the life of the machine. Both are undone here.
+    local pwstate
+    pwstate="$(passwd -S "$ADMIN_USER" 2>/dev/null | awk '{print $2}')"
+    if [[ "$pwstate" != "P" ]]; then
         local pw; pw="$(gen_secret admin-user-password)"
         echo "${ADMIN_USER}:${pw}" | chpasswd
-        log "Password for $ADMIN_USER (sudo only, no SSH login) is in $SECRETS_DIR/admin-user-password"
+        unset pw
+        log "Password for $ADMIN_USER (sudo + VNC console, no SSH login) is in $SECRETS_DIR/admin-user-password"
         # Council-Fix 4 (lock-out trap): the password exists only on-box, root has none.
         # Without an offline-saved password the provider VNC console is USELESS on an
         # SSH lock-out -> the server is unrecoverable without a reinstall.
@@ -504,7 +603,24 @@ phase1() {
         warn "Then confirm it with the receipt - phase2 refuses to start without it:"
         warn "    touch $SECRETS_DIR/admin-user-password.saved"
         warn "Only then close the first session - the VNC console needs this password."
+    else
+        log "$ADMIN_USER already has a password - keeping it."
     fi
+
+    # The bootstrap NOPASSWD rule has to go, whoever wrote it: the whole point of the
+    # admin password is that sudo asks for it. /etc/sudoers.d/hardening below sets the
+    # normal behaviour; a NOPASSWD file sorting after it would win.
+    local sf
+    for sf in /etc/sudoers.d/90-cloud-init-users /etc/sudoers.d/99-bootstrap-nopasswd; do
+        if [[ -f "$sf" ]] && grep -q NOPASSWD "$sf"; then
+            install -d -m 700 "$SECRETS_DIR"
+            cp -a "$sf" "$SECRETS_DIR/$(basename "$sf").removed" 2>/dev/null || true
+            rm -f "$sf"
+            visudo -c >/dev/null || die "sudoers broken after removing $sf - fix it before continuing."
+            log "NOPASSWD rule $sf removed (cloud-init bootstrap)."
+        fi
+    done
+
     usermod -aG sudo "$ADMIN_USER"
 
     install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "/home/$ADMIN_USER/.ssh"
@@ -543,6 +659,10 @@ phase2() {
     backup_file /etc/ssh/sshd_config
     # the cloud-init drop-in can re-enable PasswordAuthentication - remove it:
     rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf
+    # Rev.12: drop-ins and the socket override left by earlier userData drafts
+    # (the final userData writes 10-hardening.conf itself, which is rewritten below).
+    rm -f /etc/ssh/sshd_config.d/99-hih.conf /etc/ssh/sshd_config.d/10-haertung.conf \
+          /etc/systemd/system/ssh.socket.d/10-port.conf
 
     cat > /etc/ssh/sshd_config.d/10-hardening.conf <<EOF
 # Hardening drop-in - first value wins, 10- sorts before all other drop-ins
@@ -605,7 +725,9 @@ phase3() {
     log "Phase 3: ufw"
     # Guard against out-of-order runs (Review M8): is sshd listening on $SSH_PORT?
     local KEEP22
-    if ! ss -tln 2>/dev/null | grep -q ":${SSH_PORT} "; then
+    # Rev.12: ss filter instead of 'ss | grep -q' - under pipefail grep -q's early exit
+    # (SIGPIPE, 141) read as "not listening" once enough sockets were open.
+    if [[ -z "$(ss -Htln "sport = :${SSH_PORT}" 2>/dev/null)" ]]; then
         warn "sshd is NOT listening on $SSH_PORT (phase2 missing?) - port 22 stays open too."
         KEEP22=1
     else
@@ -682,7 +804,17 @@ EOF
             # one write, so clear it HERE instead of asking someone to remember.
             # /etc/msmtp-pass (mode 600) is the only place it lives from now on.
             if [[ -f "$INSTALL_CONF" ]] && grep -q '^SMTP_PASS=' "$INSTALL_CONF"; then
-                backup_file "$INSTALL_CONF"
+                # v0.6.3: NO backup_file here any more. On 2026-10-04 it left
+                # install.conf.bak.<timestamp> next to the config with the 128-character
+                # SMTP password in the clear - a file nobody looks at again. The value
+                # lives in the password manager; a copy here is only one more place to
+                # forget. Existing backups are shredded, including from earlier runs.
+                local bak
+                for bak in "$INSTALL_CONF".bak.*; do
+                    [[ -e "$bak" ]] || continue
+                    shred -u "$bak" 2>/dev/null || rm -f "$bak"
+                    warn "Deleted $bak - it held the SMTP password in the clear."
+                done
                 sed -i "s|^SMTP_PASS=.*|SMTP_PASS=''|" "$INSTALL_CONF"
                 log "SMTP_PASS written to /etc/msmtp-pass and CLEARED in $INSTALL_CONF."
                 warn "Re-running phase4 needs SMTP_PASS entered again (it is in the password manager)."
@@ -808,7 +940,7 @@ EOF
     # A crash-report uploader has no business on a server anyway.
     systemctl disable --now apport.service 2>/dev/null || true
     systemctl mask apport.service 2>/dev/null || true
-    [[ -f /etc/default/apport ]] && sed -i 's/^enabled=.*/enabled=0/' /etc/default/apport
+    if [[ -f /etc/default/apport ]]; then sed -i 's/^enabled=.*/enabled=0/' /etc/default/apport; fi
     sysctl -w fs.suid_dumpable=0 >/dev/null 2>&1 || true
 
     # --- Rev.8 (CIS ensure_pam_wheel_group_empty): /etc/pam.d/su already restricts
@@ -840,7 +972,7 @@ EOF
     # --- Rev.8 (CIS file_permission_user_init_files) ---
     for f in /root/.bashrc /root/.profile /home/"$ADMIN_USER"/.bashrc \
              /home/"$ADMIN_USER"/.profile /home/"$ADMIN_USER"/.bash_logout; do
-        [[ -f "$f" ]] && chmod 0740 "$f"
+        if [[ -f "$f" ]]; then chmod 0740 "$f"; fi
     done
 
     # Block unneeded kernel modules (attack surface of exotic protocols).
@@ -1254,7 +1386,7 @@ phase8() {
         elif [[ ! -f /etc/wireguard/server.pub ]]; then
             wg pubkey < /etc/wireguard/server.key > /etc/wireguard/server.pub
         fi
-        [[ -f /etc/wireguard/wg0.psk ]] || wg genpsk > /etc/wireguard/wg0.psk
+        [[ -f /etc/wireguard/wg0.psk ]] || { wg genpsk > /etc/wireguard/wg0.psk; touch /etc/wireguard/.psk-new; }
     )
     local SRV_KEY SRV_PUB WG_PSK
     SRV_KEY="$(cat /etc/wireguard/server.key)"
@@ -1291,7 +1423,9 @@ EOF
         systemctl enable --now wg-quick@wg0
     fi
 
-    cat <<EOF | tee "$SECRETS_DIR/wireguard-client.conf.example"
+    # Rev.12: written to the file only. 'tee' put the preshared key into every log of 'rest'.
+    install -m 600 /dev/null "$SECRETS_DIR/wireguard-client.conf.example"
+    cat > "$SECRETS_DIR/wireguard-client.conf.example" <<EOF
 # --- Client config for the LOCAL machine (~/wg-client.conf) ---
 [Interface]
 Address = ${WG_NET}.2/24
@@ -1304,6 +1438,11 @@ Endpoint     = <SERVER-IP>:$WG_PORT
 AllowedIPs   = ${WG_NET}.0/24
 PersistentKeepalive = 25
 EOF
+    if [[ -f /etc/wireguard/.psk-new ]]; then
+        rm -f /etc/wireguard/.psk-new
+        warn "NEW preshared key: the tunnel from the client is DOWN until its [Peer] section has"
+        warn "    PresharedKey = <content of /etc/wireguard/wg0.psk>  (template: $SECRETS_DIR/wireguard-client.conf.example)"
+    fi
     log "Phase 8 done. Client template: $SECRETS_DIR/wireguard-client.conf.example"
     log "OPTIONAL LATER (after 2-4 weeks of stable operation, manual):"
     log "  ufw delete limit ${SSH_PORT}/tcp && ufw allow in on wg0 to any port ${SSH_PORT} proto tcp"
@@ -1354,7 +1493,7 @@ EOF
     # === CRITICAL (Review K1): Docker bypasses ufw entirely ===
     # Docker writes its own iptables rules into the FORWARD/DOCKER chains that run BEFORE
     # all ufw hooks. 'ufw deny incoming' does NOT protect published container ports.
-    # Without this block, Portainer 9443 (phase 11) would be open despite ufw.
+    # Without this block, every published container port would be open despite ufw.
     # Fix: in the DOCKER-USER chain (which Docker honours) drop all NEW inbound from the
     # WAN interface. Loopback (NC 127.0.0.1), wg0 (tunnel) and container-to-
     # container traffic (Docker bridges) stay untouched.
@@ -1695,7 +1834,7 @@ EOF
     # a human must trigger NC/container updates (Review M1). Cron mails a reminder.
     cat > /etc/cron.monthly/container-update-reminder <<'EOF'
 #!/bin/sh
-echo "Check container updates: NC tag on hub.docker.com/_/nextcloud, Portainer image, then per stack 'docker compose pull && up -d'. Then occ upgrade if needed." \
+echo "Check container updates: NC tag on hub.docker.com/_/nextcloud, then per stack 'docker compose pull && up -d'. Then occ upgrade if needed." \
   | mail -s "Reminder: container/app updates on $(hostname)" root 2>/dev/null || true
 EOF
     chmod 700 /etc/cron.monthly/container-update-reminder
@@ -1748,6 +1887,11 @@ phase10() {
     if [[ ! -d "$BACKUP_DIR/repo-server" ]]; then
         BORG_PASSCOMMAND='cat /root/.borg-passphrase' \
             borg init --encryption=repokey-blake2 "$BACKUP_DIR/repo-server"
+    elif ! BORG_PASSCOMMAND='cat /root/.borg-passphrase' borg info "$BACKUP_DIR/repo-server" >/dev/null 2>&1; then
+        # Rev.12: after a rebuild the data volume keeps the old repo while
+        # /root/install-secrets is gone - a new passphrase made every backup fail
+        # while verify stayed green.
+        die "$BACKUP_DIR/repo-server exists but does not open with $SECRETS_DIR/borg-passphrase. Move it aside (mv $BACKUP_DIR/repo-server $BACKUP_DIR/repo-server.alt-\$(date +%y%m%d)) or put the OLD passphrase into $SECRETS_DIR/borg-passphrase, then run phase10 again."
     fi
     # Repo 2: the LOCAL machine backs up here (init from the local machine, command at the end):
     install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$BACKUP_DIR/repo-local"
@@ -1805,10 +1949,13 @@ else
     fi
 fi
 
-# ONLY config + DB dump + system. NOT the HDD itself (NC blobs are a copy of the
-# local data; the repos do not back up themselves; decision 2026-07-08):
+# Config + DB dump + system, and from v0.6.3 everything on the data volume EXCEPT
+# the two things that must not be in here: the Borg repositories themselves and the
+# Nextcloud blobs (a copy of what is synced on the Mac; decision 2026-07-08).
+# Before v0.6.3 the whole of $HDD_MOUNT was excluded, which silently left
+# $HDD_MOUNT/immo - the market reports, which exist nowhere else - unsaved.
 borg create --compression zstd,6 --stats \\
-    --exclude '/srv/nextcloud/db' --exclude '$HDD_MOUNT' \\
+    --exclude '/srv/nextcloud/db' --exclude '$BACKUP_DIR' --exclude '$NCDATA_DIR' \\
     "\$REPO::{now:%Y-%m-%d_%H%M}" \\
     /srv /etc /var/backups /home /root/.ssh /var/log/journal
 
@@ -1877,24 +2024,36 @@ EOF
 # ================== PHASE 11: ADMIN PANELS (WIREGUARD ONLY) ==================
 phase11() {
     require_root
-    log "Phase 11: Cockpit + Portainer CE (reachable via WireGuard only)"
-    wg show wg0 &>/dev/null || die "WireGuard (phase8) must be running - panels are exposed ONLY over the tunnel."
+    log "Phase 11: Cockpit (reachable via WireGuard only)"
+    wg show wg0 &>/dev/null || die "WireGuard (phase8) must be running - the panel is exposed ONLY over the tunnel."
 
-    # === Panel CA + certificate for the WireGuard address (Rev.7) ===
-    # Both panels are reached as https://<WG>.1:PORT. A certificate without that IP in
-    # its SAN makes every browser warn, however much the user trusts it. Apple additionally
-    # requires a SAN (CN alone is ignored) and a lifetime of at most 825 days.
+    # === Panel CA + certificate for the WireGuard address (Rev.7, tightened in v0.6.3) ===
+    # Cockpit is reached as https://<WG>.1:9090. A certificate without that IP in its SAN
+    # makes every browser warn, however much the user trusts it. Apple additionally requires
+    # a SAN (CN alone is ignored).
+    # v0.6.3: the CA carries nameConstraints, so this root - once imported into a browser -
+    # can only ever vouch for the WireGuard subnet and the server's own FQDN. Without that
+    # constraint an imported private root is a universal signer for every name on the web.
+    # Lifetimes shortened from 3650/800 to 1825/397 days, with an automatic reissue of the
+    # leaf 30 days before it expires.
     local ca_dir="$SECRETS_DIR/panel-ca"
     install -d -m 700 "$ca_dir"
     if [[ ! -f "$ca_dir/ca.crt" ]]; then
-        openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+        openssl req -x509 -newkey rsa:4096 -sha256 -days 1825 -nodes \
             -keyout "$ca_dir/ca.key" -out "$ca_dir/ca.crt" \
             -subj "/CN=${HOSTNAME_FQDN:-$(hostname)} Panel CA" \
             -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
-            -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null \
+            -addext "keyUsage=critical,keyCertSign,cRLSign" \
+            -addext "nameConstraints=critical,permitted;IP:${WG_NET}.0/255.255.255.0${HOSTNAME_FQDN:+,permitted;DNS:$HOSTNAME_FQDN}" 2>/dev/null \
             || die "Panel CA could not be created."
         chmod 600 "$ca_dir/ca.key"
-        log "Panel CA created: $ca_dir/ca.crt"
+        log "Panel CA created (1825 days, nameConstraints on ${WG_NET}.0/24): $ca_dir/ca.crt"
+    fi
+    openssl x509 -checkend 7776000 -noout -in "$ca_dir/ca.crt" &>/dev/null \
+        || warn "Panel CA expires within 90 days - delete $ca_dir, run phase11 again and import the new root."
+    if [[ -f "$ca_dir/panel.crt" ]] && ! openssl x509 -checkend 2592000 -noout -in "$ca_dir/panel.crt" &>/dev/null; then
+        warn "Panel certificate expires within 30 days - issuing a new one."
+        rm -f "$ca_dir/panel.crt" "$ca_dir/panel.key"
     fi
     if [[ ! -f "$ca_dir/panel.crt" ]]; then
         cat > "$ca_dir/panel.ext" <<EXTEOF
@@ -1908,12 +2067,14 @@ EXTEOF
             -subj "/CN=${WG_NET}.1" 2>/dev/null \
             || die "Panel key could not be created."
         openssl x509 -req -in "$ca_dir/panel.csr" -CA "$ca_dir/ca.crt" -CAkey "$ca_dir/ca.key" \
-            -CAcreateserial -days 800 -sha256 -extfile "$ca_dir/panel.ext" \
+            -CAcreateserial -days 397 -sha256 -extfile "$ca_dir/panel.ext" \
             -out "$ca_dir/panel.crt" 2>/dev/null \
             || die "Panel certificate could not be signed."
         rm -f "$ca_dir/panel.csr"
         chmod 600 "$ca_dir/panel.key"
-        log "Panel certificate created for ${WG_NET}.1 (800 days)."
+        openssl verify -CAfile "$ca_dir/ca.crt" "$ca_dir/panel.crt" >/dev/null \
+            || die "Panel certificate does not validate against its own CA - check nameConstraints and the SAN."
+        log "Panel certificate created for ${WG_NET}.1 (397 days), chain verified."
     fi
 
     # Cockpit: socket-activated, uses practically nothing without an open session.
@@ -1939,32 +2100,34 @@ EOF
     systemctl restart cockpit.socket
     ufw allow in on wg0 to any port 9090 proto tcp comment 'Cockpit via WireGuard'
 
-    # Portainer CE: Docker deploy + monitoring, no App Store, no proxy of its own.
-    # Needs neither 80 nor 443, binds directly to the WG address. Deploy vorlagen only -
-    # updates of deployed apps are run by hand, unlike a maintained app store.
-    # Public isolation is primarily done by the DOCKER-USER rule (phase 9),
-    # ufw + binding are defense-in-depth. The UI is never public.
-    if command -v docker &>/dev/null; then
-        if ! docker ps -a --format '{{.Names}}' | grep -qx portainer; then
-            docker volume create portainer_data >/dev/null
-            docker run -d --name portainer --restart=always \
-                -p "${WG_NET}.1:${PORTAINER_PORT}:9443" \
-                -v /var/run/docker.sock:/var/run/docker.sock \
-                -v portainer_data:/data \
-                -v "$ca_dir":/certs:ro \
-                portainer/portainer-ce:lts \
-                --sslcert /certs/panel.crt --sslkey /certs/panel.key \
-                || die "Portainer container failed to start - check 'docker logs portainer'."
-        fi
-        ufw allow in on wg0 to any port "$PORTAINER_PORT" proto tcp comment 'Portainer via WireGuard'
-    else
-        warn "Docker missing (phase9) - Portainer skipped."
-    fi
-    log "Phase 11 done. In the tunnel:  Cockpit https://${WG_NET}.1:9090  |  Portainer https://${WG_NET}.1:${PORTAINER_PORT}"
+    # v0.6.3: session timeout and a login blocklist. IdleTimeout is in MINUTES
+    # (cockpit.conf(5), section [Session]). /etc/cockpit/disallowed-users lists accounts
+    # that may never log in; root is in it by default since Cockpit 280, written here
+    # explicitly so a package update cannot quietly re-enable it.
+    cat > /etc/cockpit/cockpit.conf <<EOF
+[WebService]
+AllowUnencrypted=false
+LoginTitle=${HOSTNAME_FQDN:-$(hostname)}
+LoginTo=false
+
+[Session]
+IdleTimeout=15
+Banner=/etc/issue.net
+EOF
+    chmod 644 /etc/cockpit/cockpit.conf
+    printf 'root\n' > /etc/cockpit/disallowed-users
+    chmod 644 /etc/cockpit/disallowed-users
+    systemctl restart cockpit.socket
+
+    # v0.6.3: Portainer is gone. It mounted /var/run/docker.sock, which hands root on the
+    # host to whoever reaches the UI, and it was never what it was installed for - apt,
+    # not a container panel, is what adds software to this machine. phase12 removes a
+    # container, volume and image left over from an earlier run.
+    log "Phase 11 done. In the tunnel:  Cockpit https://${WG_NET}.1:9090"
     log "Import the CA root once on your client, then the browser warning is gone for good:"
     log "    $ca_dir/ca.crt"
-    warn "REQUIRED after 'all': check from OUTSIDE (a foreign network) that ${PORTAINER_PORT}/9090 are closed -"
-    warn "    nmap -Pn <server-ipv4> -p ${PORTAINER_PORT},9090   UND   nmap -6 -Pn <server-ipv6> -p ${PORTAINER_PORT},9090"
+    warn "REQUIRED after 'all': check from OUTSIDE (a foreign network) that 9090 is closed -"
+    warn "    nmap -Pn <server-ipv4> -p 9090   UND   nmap -6 -Pn <server-ipv6> -p 9090"
     warn "(Council-Fix 5: scan v6 separately - a v4 scan does not see an IPv6 hole; ss does not see the iptables exposure.)"
 }
 
@@ -1995,6 +2158,28 @@ phase12() {
     if id ubuntu &>/dev/null; then
         pkill -u ubuntu 2>/dev/null || true
         userdel -r ubuntu 2>/dev/null && log "ubuntu user removed." || warn "ubuntu user not removed - check manually."
+    fi
+
+    # v0.6.3: Portainer is no longer installed. On a machine built before v0.6.3 the
+    # container, its volume and the image are still present - and that container has
+    # /var/run/docker.sock mounted, which is root on the host for anyone reaching it.
+    if command -v docker &>/dev/null; then
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx portainer; then
+            if docker rm -f portainer >/dev/null 2>&1; then
+                log "Portainer container removed."
+            else
+                warn "Portainer container could not be removed - check 'docker ps -a'."
+            fi
+        fi
+        if docker volume ls --format '{{.Name}}' 2>/dev/null | grep -qx portainer_data; then
+            docker volume rm portainer_data >/dev/null 2>&1 || warn "Volume portainer_data not removed."
+        fi
+        if docker image ls --format '{{.Repository}}' 2>/dev/null | grep -qx portainer/portainer-ce; then
+            docker image rm portainer/portainer-ce:lts >/dev/null 2>&1 || true
+        fi
+    fi
+    if ufw status 2>/dev/null | grep -q 'Portainer via WireGuard'; then
+        warn "ufw still has a 'Portainer via WireGuard' rule - remove it: ufw status numbered, then ufw delete <number>."
     fi
 
     # Legacy packages (rsync included on purpose - operator decision 2026-07-19; if needed: apt install rsync):
@@ -2049,6 +2234,14 @@ phase13() {
     # Market reports grow past 100 MB and keep growing; they belong on the data
     # volume, not on the 500 GB system NVMe.
     install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 750 "$HDD_MOUNT/immo" "$HDD_MOUNT/immo/Kaufpreise"
+    # Rev.12: the data volume survives a rebuild; the new system user may get another uid.
+    chown -R "$IMMO_USER:$IMMO_USER" "$HDD_MOUNT/immo"
+    # Rev.12: Caddy serves the static files and resolves try_files itself - without group
+    # read on the 750 web root every CSS/JS file and every pretty URL answered 403.
+    if id caddy &>/dev/null && ! id -nG caddy | grep -qw "$IMMO_USER"; then
+        usermod -aG "$IMMO_USER" caddy
+        systemctl restart caddy
+    fi
     [[ -e "$IMMO_DIR/Kaufpreise" ]] || ln -s "$HDD_MOUNT/immo/Kaufpreise" "$IMMO_DIR/Kaufpreise"
 
     # --- MariaDB, native, loopback only. Deliberately NOT the Nextcloud container's
@@ -2078,10 +2271,66 @@ EOF
     mariadb < "$sqlf" || die "Phase 13: MariaDB setup failed."
     shred -u "$sqlf"
 
+    # --- Two env files, and the separation between them is the point: the web process
+    # never sees the IMAP password. $IMMO_DIR/.env belongs to the Python run alone;
+    # $IMMO_WEB_ENV is handed to PHP-FPM through env[IMMO_WEB_ENV] below and carries
+    # the database credentials and the frontend keys, nothing else. This closes the
+    # finding "PHP reads the Python side's secrets" (Team B, section 2.5).
+    install -m 600 -o "$IMMO_USER" -g "$IMMO_USER" /dev/null "$IMMO_DIR/.env.new"
+    if [[ -f "$IMMO_DIR/.env" ]]; then cat "$IMMO_DIR/.env" > "$IMMO_DIR/.env.new"; fi
+    mv "$IMMO_DIR/.env.new" "$IMMO_DIR/.env"
+    env_set "$IMMO_DIR/.env" DB_HOST 127.0.0.1
+    env_set "$IMMO_DIR/.env" DB_PORT 3306
+    env_set "$IMMO_DIR/.env" DB_NAME "$IMMO_DB"
+    env_set "$IMMO_DIR/.env" DB_USER "$IMMO_DB_USER"
+    env_set "$IMMO_DIR/.env" DB_PASS "$immo_db_pass"
+    if [[ -n "$IMAP_HOST" ]]; then
+        env_set "$IMMO_DIR/.env" IMAP_HOST "$IMAP_HOST"
+        env_set "$IMMO_DIR/.env" IMAP_PORT "$IMAP_PORT"
+        env_set "$IMMO_DIR/.env" IMAP_USER "$IMAP_USER"
+        env_set "$IMMO_DIR/.env" IMAP_ORDNER "$IMAP_ORDNER"
+        if [[ -n "$IMAP_PASS" ]]; then
+            # Rev.12: values a .env reader (python-dotenv) silently misreads.
+            case "$IMAP_PASS" in
+                *'${'*|*' #'*|' '*|*' '|\'*|\"*)
+                    die "IMAP_PASS has a leading/trailing blank, a leading quote, ' #' or '\${' - a .env reader misreads that. Enter it in $IMMO_DIR/.env by hand.";;
+            esac
+            env_set "$IMMO_DIR/.env" IMAP_PASS "$IMAP_PASS"
+            # Same rule as for SMTP_PASS in phase 4: the value is needed for this one
+            # write, so it is cleared here instead of being left in install.conf.
+            if [[ -f "$INSTALL_CONF" ]] && grep -q '^IMAP_PASS=' "$INSTALL_CONF"; then
+                sed -i "s|^IMAP_PASS=.*|IMAP_PASS=''|" "$INSTALL_CONF"
+                log "IMAP_PASS written to $IMMO_DIR/.env and CLEARED in $INSTALL_CONF."
+                warn "The COPY OF install.conf ON YOUR OWN MACHINE still holds the password - clear it there too."
+            fi
+        else
+            warn "IMAP_PASS empty - enter it in $IMMO_DIR/.env by hand, the daily run cannot log in without it."
+        fi
+    else
+        warn "IMAP_HOST empty - mail retrieval not configured (set IMAP_* in install.conf, then run phase13 again)."
+    fi
+    chown "$IMMO_USER:$IMMO_USER" "$IMMO_DIR/.env"; chmod 600 "$IMMO_DIR/.env"
+
+    install -d -m 750 -o root -g "$IMMO_USER" /etc/immo
+    install -m 640 -o root -g "$IMMO_USER" /dev/null "$IMMO_WEB_ENV.new"
+    if [[ -f "$IMMO_WEB_ENV" ]]; then cat "$IMMO_WEB_ENV" > "$IMMO_WEB_ENV.new"; fi
+    mv "$IMMO_WEB_ENV.new" "$IMMO_WEB_ENV"
+    env_set "$IMMO_WEB_ENV" DB_HOST 127.0.0.1
+    env_set "$IMMO_WEB_ENV" DB_PORT 3306
+    env_set "$IMMO_WEB_ENV" DB_NAME "$IMMO_DB"
+    env_set "$IMMO_WEB_ENV" DB_USER "$IMMO_DB_USER"
+    env_set "$IMMO_WEB_ENV" DB_PASS "$immo_db_pass"
+    env_set "$IMMO_WEB_ENV" ERFASS_SCHLUESSEL "$(gen_secret immo-erfass-schluessel 32)"
+    env_set "$IMMO_WEB_ENV" MAIL_ABSENDER "${IMMO_MAIL_FROM:-${SMTP_FROM:-root@$(hostname)}}"
+    chown root:"$IMMO_USER" "$IMMO_WEB_ENV"; chmod 640 "$IMMO_WEB_ENV"
+    if grep -q '^IMAP_' "$IMMO_WEB_ENV"; then die "$IMMO_WEB_ENV holds IMAP values - the web side must never see them."; fi
+    log "Env files written: $IMMO_DIR/.env (600 $IMMO_USER) and $IMMO_WEB_ENV (640 root:$IMMO_USER)."
+
     # --- PHP-FPM pool. Own pool, own user, own socket; the stock www pool is
     # switched off because nothing uses it and every listening pool is surface.
-    [[ -f /etc/php/8.3/fpm/pool.d/www.conf ]] && \
+    if [[ -f /etc/php/8.3/fpm/pool.d/www.conf ]]; then
         mv /etc/php/8.3/fpm/pool.d/www.conf /etc/php/8.3/fpm/pool.d/www.conf.disabled
+    fi
     cat > /etc/php/8.3/fpm/pool.d/immo.conf <<EOF
 [immo]
 user = $IMMO_USER
@@ -2107,6 +2356,9 @@ php_admin_flag[expose_php] = off
 php_admin_value[session.cookie_secure] = 1
 php_admin_value[session.cookie_httponly] = 1
 php_admin_value[session.cookie_samesite] = None
+; v0.6.3: the frontend reads its database credentials and keys from this file. The
+; path is passed, not the values - and the file deliberately holds no IMAP password.
+env[IMMO_WEB_ENV] = $IMMO_WEB_ENV
 EOF
     systemctl enable --now php8.3-fpm
     systemctl restart php8.3-fpm
@@ -2238,6 +2490,7 @@ phase14() {
             printf '<!doctype html>\n<meta charset="utf-8">\n<title>%s</title>\n<p>%s ist eingerichtet.</p>\n' \
                 "$dom" "$dom" > "$dir/index.html"
             chown www-data:www-data "$dir/index.html"
+            chmod 644 "$dir/index.html"
         fi
         # Static only: a gallery and a portfolio need no PHP, and no interpreter is
         # the cheapest hardening there is. If one of them later needs PHP, it gets
@@ -2419,9 +2672,9 @@ verify() {
     # pipefail makes that the status of the whole pipeline. The failure is
     # intermittent - it only appears once the producer writes more than fits in
     # the pipe buffer, i.e. as the machine gains listening sockets and ufw rules.
-    # Found on the production server 2026-10-04: 'SSH listens on 64028' and
-    # 'Portainer listens on 9443' alternated as false negatives while both were
-    # demonstrably correct. The subshell keeps the change local to the check.
+    # Found on the production server 2026-10-04: 'SSH listens on 64028' and the
+    # Portainer check (removed in v0.6.3) alternated as false negatives while both
+    # were demonstrably correct. The subshell keeps the change local to the check.
     chk() { if ( set +o pipefail; eval "$2" ) &>/dev/null; then echo "[OK]   $1"; ok=$((ok+1)); else echo "[MISSING] $1"; fail=$((fail+1)); fi; }
 
     chk "SSH service active"               "systemctl is-active ssh"
@@ -2451,9 +2704,10 @@ verify() {
     chk "NC 2FA helper present"            "test -x /usr/local/bin/nc-post-setup.sh"
     chk "Caddy running"                    "systemctl is-active caddy"
     chk "Cockpit socket active"            "systemctl is-active cockpit.socket"
-    # Portainer needs a moment to bind after start - retry instead of a false MISSING (Review M5).
-    # SUBSHELL (...) - otherwise 'exit' via eval would end the whole verify (final review HIGH):
-    chk "Portainer listens on ${PORTAINER_PORT}" "( for i in 1 2 3 4 5 6; do ss -tln | grep -q \":${PORTAINER_PORT} \" && exit 0; sleep 5; done; exit 1 )"
+    chk "Cockpit on WG address only"       "ss -tln | grep -q \"${WG_NET}.1:9090\""
+    chk "Cockpit IdleTimeout set"          "grep -q '^IdleTimeout=' /etc/cockpit/cockpit.conf"
+    chk "Cockpit root login blocked"       "grep -qx root /etc/cockpit/disallowed-users"
+    chk "no Portainer container"           "! docker ps -a --format '{{.Names}}' | grep -qx portainer"
     chk "HDD mounted ($HDD_MOUNT)"         "mountpoint -q $HDD_MOUNT"
     # Rev.8: 1% on volumes >= 1 TB, 5% below - so accept the whole band instead of
     # pinning 5%, and only reject 0 (no reserve at all) or an absurdly large reserve.
@@ -2501,6 +2755,11 @@ verify() {
         chk "immo: Caddy site file"        "test -f /etc/caddy/conf.d/20-immo.caddy"
         chk "immo: frame-ancestors set"    "grep -q 'frame-ancestors' /etc/caddy/conf.d/20-immo.caddy"
         chk "immo: SameSite=None in pool"  "grep -q 'session.cookie_samesite. = None' /etc/php/8.3/fpm/pool.d/immo.conf"
+        chk "immo: env[IMMO_WEB_ENV] set"   "grep -q '^env\\[IMMO_WEB_ENV\\]' /etc/php/8.3/fpm/pool.d/immo.conf"
+        chk "immo: .env 600 and immo-owned" "[[ \"\$(stat -c '%a %U' \"$IMMO_DIR/.env\")\" == \"600 $IMMO_USER\" ]]"
+        chk "immo: web.env 640 root:$IMMO_USER" "[[ \"\$(stat -c '%a %U:%G' \"$IMMO_WEB_ENV\")\" == \"640 root:$IMMO_USER\" ]]"
+        chk "immo: web.env without IMAP"    "! grep -q '^IMAP_' \"$IMMO_WEB_ENV\""
+        chk "immo: IMAP port 993 not 995"   "! grep -q '^IMAP_PORT=995' \"$IMMO_DIR/.env\""
         chk "immo: timer active (or off, no venv)" "[[ ! -x \"$IMMO_DIR/.venv/bin/python3\" ]] || systemctl is-active immo-lauf.timer"
         chk "immo: Borg pre-hook"          "test -x /usr/local/lib/backup-pre.d/10-immo-db.sh"
         chk "immo: reports on data volume" "test -d \"$HDD_MOUNT/immo/Kaufpreise\""
@@ -2517,6 +2776,8 @@ verify() {
     if [[ "$ENABLE_GRUB_PASSWORD" == "yes" ]]; then
         chk "GRUB password + unrestricted"  "grep -q 'password_pbkdf2' /boot/grub/grub.cfg && grep -q -- '--unrestricted' /boot/grub/grub.cfg"
     fi
+    chk "no install.conf.bak.* left"       "( shopt -s nullglob; f=(\"$INSTALL_CONF\".bak.*); [[ \${#f[@]} -eq 0 ]] )"
+    chk "Borg: data volume included"       "grep -q \"exclude '$BACKUP_DIR'\" /usr/local/bin/backup-server.sh"
     chk "SMTP_PASS cleared in install.conf" "! grep -qE \"^SMTP_PASS=['\\\"]?[^'\\\"[:space:]]\" \"$INSTALL_CONF\" 2>/dev/null"
     chk "rsync present, daemon masked"     "command -v rsync >/dev/null && [[ \"\$(systemctl is-enabled rsync 2>/dev/null)\" != enabled ]]"
 
@@ -2526,6 +2787,21 @@ verify() {
 }
 
 # ================================ DISPATCH ===================================
+# v0.6.3: the final Lynis audit writes a FILE. Until now it was a line in the closing
+# notes, run by hand, and its output was lost - 30-lynis.log on the production server
+# was empty after the first install.
+lynis_audit() {
+    require_root
+    command -v lynis >/dev/null 2>&1 || die "Lynis is not installed - run phase4 first."
+    install -d -m 700 "$TESTS_DIR"
+    log "Lynis audit running (several minutes) - output: $TESTS_DIR/30-lynis.log"
+    lynis audit system --quick --no-colors > "$TESTS_DIR/30-lynis.log" 2>&1 || true
+    chmod 600 "$TESTS_DIR/30-lynis.log"
+    local hi
+    hi="$(grep -i 'Hardening index' "$TESTS_DIR/30-lynis.log" | tail -1 | tr -s ' ' || true)"
+    log "Lynis done. ${hi:-see $TESTS_DIR/30-lynis.log}"
+}
+
 # B2 (v0.6.3): the gate between phase1 and phase2. Phase 2 switches the root login off,
 # so the admin password has to be in the operator's hands - not merely on the disk -
 # before it runs. The password is printed to the TERMINAL only, never through log()/warn()
@@ -2537,13 +2813,17 @@ password_gate() {
         return 0
     fi
     [[ -f "$SECRETS_DIR/admin-user-password" ]] || die "$SECRETS_DIR/admin-user-password missing - run phase1 first."
+    # Rev.12: check for a real terminal BEFORE the password is shown - a redirected
+    # stdout put it into the log file, and a piped "yes" passed the gate unattended.
+    [[ -t 0 && -t 1 ]] && { : > /dev/tty; } 2>/dev/null \
+        || die "No interactive terminal - run 'bootstrap' in an open session (ssh -t, sudo -i), output NOT redirected."
     echo ""
     warn "Admin password for $ADMIN_USER - into the password manager AND onto paper, now:"
-    echo "    $(cat "$SECRETS_DIR/admin-user-password")"
-    echo ""
+    printf '    %s\n\n' "$(cat "$SECRETS_DIR/admin-user-password")" > /dev/tty
     warn "After phase 2 root can no longer log in. Without this password the VNC console is useless."
     local ans3
-    read -r -p "Password stored in the password manager and on paper? Only then 'yes': " ans3 \
+    # -t 3600 overrides an inherited TMOUT=900 (phase 5), which would end read early.
+    read -r -t 3600 -p "Password stored in the password manager and on paper? Only then 'yes': " ans3 < /dev/tty \
         || die "No interactive terminal - run 'bootstrap' in an open root session, or: touch $SECRETS_DIR/admin-user-password.saved"
     [[ "$ans3" == "yes" ]] || die "Aborted - save the password first, then start again (the phases are idempotent)."
     : > "$SECRETS_DIR/admin-user-password.saved"
@@ -2552,13 +2832,16 @@ password_gate() {
 }
 
 usage() {
-    sed -n '154,173p' "$0"
+    # Pattern instead of line numbers: the numeric range silently pointed at the
+    # change history once the header grew (found in v0.6.3).
+    sed -n '/^# USAGE (as root/,/^# Rescue anchor on lock-out/p' "$0"
     echo "Phases: preflight phase1 ... phase12   verify"
     echo "Optional phases (each behind its own switch, all default off):"
     echo "  phase13  immo.flow (ENABLE_IMMO)        phase14  further static sites (ENABLE_EXTRA_SITES)"
     echo "  phase15  Talk HPB  (ENABLE_TALK_HPB)"
     echo "Maintenance: caddy-base  (rebuild Caddyfile + Nextcloud site after an upgrade to Rev.10)"
-    echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-15 + verify)  all (everything with the stop)"
+    echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-15 + verify + lynis)  all (everything with the stop)"
+    echo "Audit: lynis (writes \$TESTS_DIR/30-lynis.log)"
 }
 
 main() {
@@ -2581,6 +2864,7 @@ main() {
             log "Caddy structure rebuilt: /etc/caddy/Caddyfile imports $CADDY_CONFD/*.caddy"
             ;;
         verify) verify || true ;;
+        lynis) lynis_audit ;;
         bootstrap)
             preflight; phase1; password_gate; phase2
             echo ""
@@ -2593,10 +2877,11 @@ main() {
         rest)
             # Continuation after a passed login test (bootstrap). Assumes the
             # prerequisites (DNS, HDD, WG pubkey, NC tag, SMTP) are set up front.
-            ss -tln 2>/dev/null | grep -q ":${SSH_PORT} " || die "sshd not listening on $SSH_PORT - run 'bootstrap' + login test first."
+            [[ -n "$(ss -Htln "sport = :${SSH_PORT}" 2>/dev/null)" ]] || die "sshd not listening on $SSH_PORT - run 'bootstrap' + login test first."
             phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11; phase12
             phase13; phase14; phase15
             verify || true
+            lynis_audit || true
             warn "Plan a reboot (boot params/fstab only take effect then): shutdown -r +1"
             ;;
         all)
@@ -2605,7 +2890,7 @@ main() {
             echo ""
             warn "STOP: now log in from a SECOND terminal:"
             warn "    $(login_cmd)"
-            read -r -p "Login in the second terminal successful? Only then type 'yes': " ans \
+            read -r -t 3600 -p "Login in the second terminal successful? Only then type 'yes': " ans \
                 || die "No interactive terminal - 'all' needs input. Run the phases individually."
             [[ "$ans" == "yes" ]] || die "Aborted - test the SSH login first, then run './install.sh all' again (phases are idempotent)."
             # Council-Fix 4 used to ask about the offline copy HERE, after phase2 - too
@@ -2613,6 +2898,7 @@ main() {
             phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11; phase12
             phase13; phase14; phase15
             verify || true   # one open point must not swallow the final notes (Review M7)
+            lynis_audit || true
             warn "Plan a reboot (boot params, fstab, possibly the kernel): shutdown -r +1"
             ;;
         *) usage; exit 1 ;;

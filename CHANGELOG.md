@@ -2,6 +2,68 @@
 
 All notable changes to this project are documented here. Versions follow a SemVer-style `0.x` scheme. The detailed pre-release script-revision log (install.sh Rev. 4 → Rev. 5) is kept at the bottom for reference.
 
+## [0.6.4] - 2026-10-06
+
+Findings of a two-team review (four independent reviewers) before the rebuild of the production server through cloud-init. None of them aborts a run; each one left `verify` green while something did not work. Nothing in this release has run on a server yet.
+
+### Fixed
+- **Files that Caddy must read came out 640.** After phase 5 sets `UMASK 027`, every `sudo` inherits it through `pam_umask`; the phase-14 placeholder pages were unreadable for Caddy (403). The script now sets `umask 022` at the top; every private file has its own explicit mode.
+- **Caddy could not read the immo.flow web root** (750 `immo`): static files and pretty URLs answered 403. Phase 13 adds `caddy` to the group `immo`, and re-owns the data-volume directory, which survives a rebuild while the uid may change.
+- **`password_gate` showed the password before checking for a terminal.** With redirected output it landed in the log, and a piped `yes` passed the gate. The terminal is checked first; output and input go through `/dev/tty`; `read -t 3600` overrides the inherited `TMOUT`.
+- **Phase 8 wrote the WireGuard preshared key into the run log** through `tee`. The client template goes to the file only, and a newly generated key is announced - the tunnel is down until the client has it.
+- **An existing Borg repository plus a new passphrase failed every backup silently.** Phase 10 now aborts with instructions when `repo-server` does not open with the current passphrase.
+- **`dns_gate` ended the script without a message** when a name did not resolve (`getent` rc 2 under `pipefail`). Same class: the `grep` in `lynis_audit`, and `ss | grep -q` (SIGPIPE) in phase 3 and `rest`, now an `ss` filter.
+- IMAP passwords that a `.env` reader misreads (`${`, ` #`, leading/trailing blank, leading quote) are refused in phase 13.
+
+### Changed
+- Phase 2 removes sshd drop-ins and the `ssh.socket` override left by earlier `userData` drafts.
+- `preflight` waits for cloud-init and sets a 600 s dpkg lock timeout - right after a rebuild `apt-daily` holds the lock.
+
+## [0.6.3] - 2026-10-05
+
+The four blockers from the 2026-10-04 audit, the owner's decisions of 2026-10-05, and three faults found while implementing them. Nothing in this release has run on a server yet.
+
+### Fixed
+- **The signaling `blockkey` had a random length.** `gen_secret` varies every secret by plus/minus four characters around its base, so the `blockkey` (base 16) came out between 12 and 20 characters. The signaling server accepts exactly 16, 24 or 32 bytes and aborts the start otherwise - eight of nine fresh installations would have crash-looped. New `gen_fixed()` writes hex secrets of an exact length, and phase 15 discards an existing key of the wrong length.
+- **The lock-out trap at the admin password.** Nothing stopped `ADMIN_USER=root` or `SSH_PORT=22`, both of which phase 2 turns into a locked door. Phase 1 created the password only when the user did not yet exist, and phase 2 switched off the root login without checking that anyone had written the password down. There are now two abort conditions before the first phase, a receipt file `admin-user-password.saved` that phase 2 requires, and `password_gate()` between phase 1 and phase 2 which shows the password on the terminal - never in the log file - and writes that receipt after confirmation.
+- **The cloud-init path produced a machine with no route to root.** On a server built from `userData` the admin user already exists with a locked password and `NOPASSWD` sudo; phase 1 skipped the password because of the "user does not exist" condition. Phase 1 now sets the password whenever the account has none, and removes the bootstrap `NOPASSWD` rule.
+- **The market reports were in no backup.** The Borg exclude covered the whole data volume, which was right for the Nextcloud blobs (a copy of what the Mac syncs) and wrong for `immo/Kaufpreise`, which exists nowhere else. Only the repositories and the Nextcloud data directory are excluded now.
+- **`install.conf` was copied before the password was cleared from it.** `backup_file` left `install.conf.bak.<timestamp>` with the SMTP password in the clear next to the config - a file nobody looks at again. The copy is no longer made, existing ones are shredded, and `verify` fails while one is left.
+- **`usage()` printed the wrong part of the header** (`sed -n '48,67p'`, which had drifted onto the change history). It now selects the block by pattern, so it cannot drift again.
+- **`verify` reported a planned failure.** With `ENABLE_IMMO=yes` and no virtual environment the `immo-lauf` timer is deliberately off, but the check demanded it be active. The check is now conditional on `.venv/bin/python3`.
+
+### Removed
+- **Portainer CE.** It mounted `/var/run/docker.sock`, which is root on the host for anyone who reaches the UI, and it was never what it had been installed for - `apt`, not a container panel, adds software to this machine. Phase 12 removes a container, volume and image left from an earlier run; `verify` now asserts the container is gone.
+
+### Changed
+- **Panel CA:** `nameConstraints` limit the private root to the WireGuard subnet and the server's own FQDN, so importing it into a browser no longer creates a universal signer. Lifetimes 3650/800 to 1825/397 days, automatic reissue of the leaf 30 days before expiry, and the chain is checked with `openssl verify` after signing.
+- **Cockpit:** `IdleTimeout=15` minutes, the legal banner on the login page, and `root` written into `/etc/cockpit/disallowed-users` explicitly. No TOTP: the panel is reachable only inside the tunnel.
+- **Phase 13 writes both environment files.** `$IMMO_DIR/.env` (600, `immo`) carries the database credentials and the IMAP values; `/etc/immo/web.env` (640 `root:immo`) carries the database credentials and the frontend keys and no IMAP password, handed to PHP through `env[IMMO_WEB_ENV]` in the pool. The web process can no longer read the mail password. `IMAP_PORT` defaults to 993 - 995 is POP3 over TLS, not IMAP. New helper `env_set()` changes single keys without touching lines the application wrote.
+- **Lynis** has its own target and runs at the end of `rest` and `all`, writing `$TESTS_DIR/30-lynis.log`. Until now the audit was a line in the closing notes and its output was lost.
+- `SWAPFILE_SIZE_GB="8"` belongs in `install.conf`; the provider panel keeps swap at 0.
+- `verify`: 76 to 86 checks, all of which run under the production switches.
+
+## [0.6.2] - 2026-10-04
+
+Phase 15 started for the first time on a real server, and both faults it had are fixed. Talk HPB is now verified end to end.
+
+### Fixed
+- **The signaling container crash-looped on its own configuration.** The image drops privileges to the user `spreedbackend` (uid/gid 850) in its entrypoint, so the root-owned `600` `server.conf` was unreadable: `Could not read configuration: open /config/server.conf: permission denied`. The file is now owned by 850:850; `644` is not an option because it carries the backend secret and the session keys.
+- **Janus was unreachable by name.** Janus needs host networking - its RTP range would otherwise need one userland proxy per UDP port - and a host-networked container has no name on a bridge network, so the signaling server died on `lookup janus on 127.0.0.11:53: server misbehaving`. All three services now run on the host network with every port bound to the loopback: NATS on `127.0.0.1:4222`, signaling on `127.0.0.1:8081`, Janus on `8188` behind the ufw default deny. Mixing the two network modes was the trap; using one for all three removes it.
+
+### Verified on real hardware
+`https://next.brill.ing/standalone-signaling/api/v1/welcome` answers 200 through Caddy, the signaling server reports `Using janus MCU`, and Talk 25.0.5 is installed with both the signaling server and the TURN server registered. Lynis on the finished machine: hardening index 87, 272 tests, zero warnings, 20 suggestions - the same index the test server reached.
+
+## [0.6.1] - 2026-10-04
+
+First production installation, and the bug it exposed.
+
+### Fixed
+- **`verify` produced random false negatives.** The checks run under `set -o pipefail`, so every check shaped `producer | grep -q PATTERN` reported FAILURE even when the pattern matched: `grep -q` exits at the first hit, the producer gets SIGPIPE and ends with status 141, and `pipefail` promotes that to the status of the whole pipeline. It stayed invisible until the machine had enough listening sockets for `ss` to overflow the pipe buffer - on the production server `SSH listens on 64028` and `Portainer listens on 9443` alternated as failures while both were demonstrably correct. `chk()` now evaluates in a subshell with `pipefail` off. Same class as the Rev. 7 sysctl bug and the Rev. 8 banner bug: the configuration was right, the check was wrong.
+
+### Verified on real hardware
+Installed on the production server on 2026-10-04: phases 3-12 green, reboot clean, UEFI confirmed through `/sys/firmware/efi`, then phases 13, 14 and 15 through on the first run. `verify` 75 of 75. The Nextcloud stack, `php8.3-fpm`, the native MariaDB on the loopback, `coturn` and the `immo-lauf` timer are all active; `/etc/caddy/conf.d/` holds the four expected site files and all four domains answer over HTTPS.
+
 ## [0.6.0] - 2026-10-03
 
 Three previously separate projects move onto one server. All three new phases are behind their own switch and default to off, so an existing installation behaves exactly as before.
