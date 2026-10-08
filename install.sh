@@ -204,6 +204,11 @@
 #          - phase3/'rest': ss filter instead of 'ss | grep -q' (SIGPIPE under pipefail).
 #          - phase2 removes sshd drop-ins and the ssh.socket override of older userData drafts.
 #          - preflight waits for cloud-init and sets a 600 s dpkg lock timeout.
+#          - admin password in the owner's VNC pattern (gen_vnc_password):
+#            bbBbbbbb-BBBBBB-bbbbb-bbBbbbbb-zzzzzzz-bbbbbb-bbbBbbbb, no y/z/I/O/l.
+#          - phase 1 login hint names the port sshd really listens on.
+#          - phase5: grub-mkpasswd-pbkdf2 under setsid -w; in a background run it read
+#            /dev/tty and the whole script was stopped (SIGTTIN) on 2026-10-06.
 #
 # USAGE (as root on a fresh Ubuntu 24.04):
 #   ./install.sh preflight        # checks + apt update/upgrade
@@ -520,6 +525,37 @@ gen_secret() {  # gen_secret <name> [base-length]  - create/read a secret, print
     cat "$f"
 }
 
+gen_vnc_password() {  # gen_vnc_password <name> - admin password in the owner's VNC pattern
+    # Rev.12: the admin password is typed at the provider's VNC console, so the owner
+    # fixed its shape (2026-10-06):  bbBbbbbb-BBBBBB-bbbbb-bbBbbbbb-zzzzzzz-bbbbbb-bbbBbbbb
+    # b = lower-case letter, B = upper-case letter, z = digit. y/z and Y/Z are left out
+    # (swapped on a German keyboard behind US key positions), I, O and l as well
+    # (mistaken for 1/0 when copied from paper). Random source: openssl rand.
+    local f="$SECRETS_DIR/$1"
+    if [[ ! -f "$f" ]]; then
+        install -d -m 700 "$SECRETS_DIR"
+        local pat='bbBbbbbb-BBBBBB-bbbbb-bbBbbbbb-zzzzzzz-bbbbbb-bbbBbbbb'
+        local lo='abcdefghijkmnopqrstuvwx' up='ABCDEFGHJKLMNPQRSTUVWX' dg='0123456789'
+        local plo='' pup='' pdg='' out='' i c
+        while (( ${#plo} < 40 )); do plo+="$(openssl rand 256 | LC_ALL=C tr -dc "$lo")"; done
+        while (( ${#pup} < 12 )); do pup+="$(openssl rand 256 | LC_ALL=C tr -dc "$up")"; done
+        while (( ${#pdg} < 8 ));  do pdg+="$(openssl rand 256 | LC_ALL=C tr -dc "$dg")"; done
+        for (( i = 0; i < ${#pat}; i++ )); do
+            c="${pat:i:1}"
+            case "$c" in
+                b) out+="${plo:0:1}"; plo="${plo:1}" ;;
+                B) out+="${pup:0:1}"; pup="${pup:1}" ;;
+                z) out+="${pdg:0:1}"; pdg="${pdg:1}" ;;
+                *) out+="$c" ;;
+            esac
+        done
+        ( umask 077; printf '%s\n' "$out" > "$f" ) || die "could not write $f"
+        [[ "$(head -1 "$f")" =~ ^[a-x][a-x][A-X][a-x]{5}-[A-X]{6}-[a-x]{5}-[a-x]{2}[A-X][a-x]{5}-[0-9]{7}-[a-x]{6}-[a-x]{3}[A-X][a-x]{4}$ ]] \
+            || die "admin password does not match the pattern - $f"
+    fi
+    cat "$f"
+}
+
 gen_fixed() {  # gen_fixed <name> <chars> - hex secret of exactly <chars> characters (= bytes in the config)
     local f="$SECRETS_DIR/$1"
     if [[ ! -f "$f" ]]; then
@@ -591,18 +627,17 @@ phase1() {
     local pwstate
     pwstate="$(passwd -S "$ADMIN_USER" 2>/dev/null | awk '{print $2}')"
     if [[ "$pwstate" != "P" ]]; then
-        local pw; pw="$(gen_secret admin-user-password)"
+        local pw; pw="$(gen_vnc_password admin-user-password)"
         echo "${ADMIN_USER}:${pw}" | chpasswd
         unset pw
         log "Password for $ADMIN_USER (sudo + VNC console, no SSH login) is in $SECRETS_DIR/admin-user-password"
         # Council-Fix 4 (lock-out trap): the password exists only on-box, root has none.
         # Without an offline-saved password the provider VNC console is USELESS on an
         # SSH lock-out -> the server is unrecoverable without a reinstall.
-        warn "REQUIRED: show the password NOW and save it offline (password manager + paper):"
-        warn "    cat $SECRETS_DIR/admin-user-password"
-        warn "Then confirm it with the receipt - phase2 refuses to start without it:"
-        warn "    touch $SECRETS_DIR/admin-user-password.saved"
-        warn "Only then close the first session - the VNC console needs this password."
+        # Rev.12: 'bootstrap' and 'all' show the password at password_gate. These lines
+        # matter only when phase1 is run on its own.
+        log "bootstrap/all show it before phase 2. Running phase1 alone: read it, store it"
+        log "offline, then: touch $SECRETS_DIR/admin-user-password.saved (phase2 requires it)."
     else
         log "$ADMIN_USER already has a password - keeping it."
     fi
@@ -636,8 +671,11 @@ Defaults logfile="/var/log/sudo.log"
 EOF
     chmod 440 /etc/sudoers.d/hardening
     visudo -c >/dev/null || die "sudoers syntax error!"
+    # Rev.12: on the cloud-init path sshd already listens on SSH_PORT and 22 is closed.
+    local p1port=22
+    [[ -n "$(ss -Htln "sport = :${SSH_PORT}" 2>/dev/null)" ]] && p1port="$SSH_PORT"
     log "Phase 1 done. TEST in a 2nd terminal:"
-    log "    $(login_cmd 22)"
+    log "    $(login_cmd "$p1port")"
     log "    then:  sudo -v"
 }
 
@@ -1020,7 +1058,10 @@ EOF
         fi
         local gpw ghash
         gpw="$(cat "$gpw_file")"
-        ghash="$(printf '%s\n%s\n' "$gpw" "$gpw" | grub-mkpasswd-pbkdf2 2>/dev/null \
+        # Rev.12: grub-mkpasswd-pbkdf2 reads from /dev/tty when the process has a
+        # controlling terminal. In a background run (nohup ... &) that stopped the whole
+        # script with SIGTTIN. setsid -w drops the terminal, so the tool reads the pipe.
+        ghash="$(printf '%s\n%s\n' "$gpw" "$gpw" | setsid -w grub-mkpasswd-pbkdf2 2>/dev/null \
             | awk '/pbkdf2\.sha512/{print $NF}')"
         if [[ ${#ghash} -gt 100 ]]; then
             # --unrestricted FIRST, then the password - in that order a failure of the
@@ -2871,8 +2912,7 @@ main() {
             warn "STOP: now log in from a SECOND terminal:"
             warn "    $(login_cmd)"
             warn "    then:  sudo -v"
-            warn "Login OK -> save the admin password offline:  cat $SECRETS_DIR/admin-user-password"
-            warn "Only THEN continue with:  ./install.sh rest"
+            warn "Login OK -> continue with:  ./install.sh rest"
             ;;
         rest)
             # Continuation after a passed login test (bootstrap). Assumes the

@@ -204,6 +204,29 @@ def main():
                   "Passphrase und Schluesselexport bewusst in getrennten Objekten halten.\n\n"
                   "Erzeugt %s auf %s." % (today, host)))
 
+    # 2026-10-06: secrets of phases 13 and 15, until now not carried over.
+    for fname, label, user, extra in (
+            ("immo-db-pass", "immo MariaDB", "immo",
+             "Datenbankkonto immo auf der nativen MariaDB (127.0.0.1:3306), Datenbank immo.\n"
+             "Steht auch in /srv/immo/.env und /etc/immo/web.env."),
+            ("immo-erfass-schluessel", "immo Erfassungsschluessel", None,
+             "ERFASS_SCHLUESSEL des immo.flow-Frontends (Bookmarklet). Steht in /etc/immo/web.env."),
+            ("turn-secret", "Talk TURN secret", None,
+             "Gemeinsames Geheimnis zwischen Nextcloud Talk und coturn (Port 3478)."),
+            ("signaling-secret", "Talk signaling secret", None,
+             "Geheimnis zwischen Nextcloud Talk und dem Signaling-Server."),
+            ("signaling-hashkey", "Talk signaling hashkey", None,
+             "Sitzungsschluessel des Signaling-Servers (hashkey)."),
+            ("signaling-blockkey", "Talk signaling blockkey", None,
+             "Sitzungsschluessel des Signaling-Servers (blockkey)."),
+    ):
+        pw = read_secret(fname)
+        if pw:
+            items.append(item(
+                "%s - %s > Server" % (pfx, label), password=pw, username=user,
+                notes="%s\n\nQuelle: %s/%s\n\nErzeugt %s auf %s."
+                      % (extra, SECRETS_DIR, fname, today, host)))
+
     for fname, label, extra in (
             ("borg-repo-server-key.txt", "borg-repo-server-key.txt",
              "Schluesselexport des Repositorys repo-server."),

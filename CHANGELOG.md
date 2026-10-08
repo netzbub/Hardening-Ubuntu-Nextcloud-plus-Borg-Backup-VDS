@@ -16,6 +16,7 @@ Findings of a two-team review (four independent reviewers) before the rebuild of
 - IMAP passwords that a `.env` reader misreads (`${`, ` #`, leading/trailing blank, leading quote) are refused in phase 13.
 
 ### Changed
+- **The admin password follows the owner's VNC pattern** `bbBbbbbb-BBBBBB-bbbbb-bbBbbbbb-zzzzzzz-bbbbbb-bbbBbbbb` (b lower case, B upper case, z digit; no y/z/I/O/l). It is typed at the provider's VNC console, where the 60-character `pwgen` secret with symbols was impractical.
 - Phase 2 removes sshd drop-ins and the `ssh.socket` override left by earlier `userData` drafts.
 - `preflight` waits for cloud-init and sets a 600 s dpkg lock timeout - right after a rebuild `apt-daily` holds the lock.
 
