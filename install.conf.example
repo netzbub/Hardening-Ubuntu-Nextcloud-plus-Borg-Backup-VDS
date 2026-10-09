@@ -19,11 +19,20 @@ HOSTNAME_FQDN="server.example.com"   # optional; leave empty to keep the provide
 # --- Nextcloud ---
 NC_DOMAIN="next.example.com"
 NC_IMAGE_TAG=""                      # current stable tag, e.g. "31" (WITHOUT the -apache suffix)
+# NC_DB_IMAGE="mariadb:11.8"         # Rev.13: pinned database line
+# NC_REDIS_IMAGE="redis:7.4-alpine"
+# NC_DB_BUFFER_POOL="1G"
+# NC_PHONE_REGION="DE"
+# NC_MAINT_WINDOW="1"                # start hour (UTC) of the maintenance window
+# NC_LOGLEVEL="2"                    # fail2ban needs <= 2
+# NC_MAIL_FROM="next"                # sender local part; password in $SECRETS_IN_DIR/smtp-next
+# NC_MAIL_DOMAIN="example.com"
 
 # --- WireGuard ---
 WG_PORT="51820"
 WG_NET="10.8.0"                      # /24 appended; server = .1, local machine = .2
 WG_CLIENT_PUBKEY=""                  # your local machine's WireGuard public key
+# WG_PEERS=""                        # Rev.13: more devices, "name:publickey:lastoctet ..." (3-254)
 
 # --- Mail (msmtp) ---
 SMTP_HOST="mail.example.com"
@@ -31,9 +40,21 @@ SMTP_PORT="587"
 SMTP_USER="admin@example.com"        # often the full address
 SMTP_PASS=""                         # ONE-TIME only; clear again after Phase 4
 SMTP_FROM="admin@example.com"
+# Rev.13: second sender for application alarms; its password goes into
+# $SECRETS_IN_DIR/smtp-alarm (one line, root 600), never into this file.
+# SMTP_ALARM_FROM="alarm@example.com"
+# SECRETS_IN_DIR="/root/install-secrets.in"
+
+# --- Rev.13: accounts, SSH, fail2ban ---
+# ADMIN_PW_REMIND_DAYS="182"         # admin password never expires; daily reminder mail from day 182
+# ADMIN_PW_REMIND_TO=""              # default: SMTP_ALARM_FROM, else ADMIN_MAIL
+# SHELL_TMOUT="900"                  # idle logout of interactive shells, seconds
+# SSH_TCP_FORWARDING="no"            # "yes" only if SSH tunnels are really used
+# F2B_IGNOREIP=""                    # networks fail2ban never bans, e.g. a fixed office IPv6 /64
+# KEEP_SNAPD="no"                    # "yes" keeps snapd for Canonical Livepatch (Ubuntu Pro)
+# BORG_TIMER="*-*-* 05:00:00"        # daily server backup
 
 # --- Optional overrides (defaults shown; uncomment to change) ---
-# RUNTIPI_DIR="/opt/runtipi"
 # HDD_MOUNT="/srv/hdd"
 # TIMEZONE="Europe/Berlin"
 # WAN_IF=""                          # empty = auto-detect the WAN interface
@@ -51,6 +72,8 @@ SMTP_FROM="admin@example.com"
 # IMMO_DB="immo"
 # IMMO_DB_USER="immo-user"
 # IMMO_RUN_TIME="15:00"              # daily run, server timezone
+# IMMO_ONLINE_TIMES="07:00 19:00"    # Rev.13: online check; empty = off
+# IMMO_ALARM_TO=""                   # failure mails; default SMTP_ALARM_FROM
 # ENABLE_IMMO_PLAYWRIGHT="no"        # ~400 MB disk, ~1 GB RAM while running
 # --- mail RETRIEVAL for the daily run (phase 13). No inbound mail server on this box:
 #     no MX record, no SMTP acceptance - the mailbox stays at the provider.
@@ -72,3 +95,17 @@ SMTP_FROM="admin@example.com"
 # JANUS_RTP_MIN="20000"
 # JANUS_RTP_MAX="20100"
 # JANUS_IMAGE="canyan/janus-gateway:latest"   # UNVERIFIED - check before first run
+
+# --- Optional phase 16: Euro-Office document server for Nextcloud ---
+# Needs an A/AAAA record for EO_DOMAIN pointing at this server, and a running
+# Nextcloud stack. The JWT is generated (hex) or an existing one in $EO_DIR/.env is kept.
+# ENABLE_OFFICE="no"
+# EO_DOMAIN="office.example.com"
+# EO_IMAGE="ghcr.io/euro-office/documentserver:v9.3.4-hotfix.1"   # tags start with "v"
+# EO_DIR="/srv/eurooffice"
+# EO_PORT="8890"
+# EO_MEM_LIMIT="6g"
+
+# --- Optional phase 17 (Rev.13): ClamAV for uploads to Nextcloud ---
+# ENABLE_CLAMAV="no"
+# AV_INFECTED_ACTION="only_log"      # only_log | delete
