@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented here. Versions follow a SemVer-style `0.x` scheme. The detailed pre-release script-revision log (install.sh Rev. 4 → Rev. 5) is kept at the bottom for reference.
 
+## [Unreleased] - Rev. 13, in progress
+
+### Added
+- **Phase 17: ClamAV for Nextcloud uploads** (`ENABLE_CLAMAV`): clamd on the host, its socket mounted read-only into the Nextcloud app and cron containers, app `files_antivirus` in socket mode, infected action configurable (`AV_INFECTED_ACTION`, default `only_log`).
+- **Admin password reminder** instead of expiry: `chage -M -1`, a daily timer mails the alarm address from `ADMIN_PW_REMIND_DAYS` (default 182) after the last change until the password is changed. No lock-out.
+- **Second mail sender** `SMTP_ALARM_FROM` with its own password file; input secrets are read from `SECRETS_IN_DIR` files, never sourced.
+- **WireGuard peer list** `WG_PEERS`; changes are applied with `wg syncconf` instead of a tunnel restart.
+- **Nextcloud base settings** in `nc-post-setup.sh`: phone region, maintenance window, log level 2, `app_api` off, database repairs, SMTP sender `NC_MAIL_FROM` with password from `SECRETS_IN_DIR/smtp-next`.
+- **immo.flow online check** units (`IMMO_ONLINE_TIMES`), failure-mail template `immo-fail-mail@.service`, `IMMO_DOMAIN` as a list.
+- `verify`: socket masked, no ECDSA host key, post-quantum kex, Borg archive age and `compact`, daily Borg timer, dump permissions, Caddy origin against the Release file, Caddy access log and its write permission, AIDE time, Lynis profile, cloud-init off, preview timer, reminder timer, fail2ban mail setting, alarm account, Livepatch, website ownership, ClamAV, and five immo checks.
+- **Caddy access logs**: snippet `(protokoll)` in the Caddyfile, `import protokoll <name>` in every site block, JSON per site under `/var/log/caddy/`, rolled by Caddy (50 MiB x 10, 30 days, 0640). The sandbox drop-in allows writing there; log files are handed to user `caddy` after `caddy validate`.
+- `/etc/lynis/custom.prf` with nine reasoned exceptions (phase 4).
+- Nextcloud: apps `previewgenerator` and `external` in `nc-post-setup.sh`; timer `nc-preview` (06:15) runs `preview:pre-generate`.
+- cloud-init is disabled in phase 12 (`/etc/cloud/cloud-init.disabled`).
+- **Phase 16: Euro-Office document server** (`ENABLE_OFFICE`, default no), the working end state of the production server on 2026-10-09: compose stack under `EO_DIR` bound to `127.0.0.1:EO_PORT`, Caddy site `40-office.caddy` (644), JWT kept from an existing `.env` or generated as hex, Nextcloud app `eurooffice` with `DocumentServerUrl` and `jwt_secret`, closing `--check`. Seven new `verify` checks behind the same switch.
+
+### Changed
+- `rest` and `all` run phase 12 (cleanup, AIDE baseline) last, after phases 13-17 and a final upgrade; AIDE excludes the directories that change daily.
+- SSH: `AllowTcpForwarding no` by default (`SSH_TCP_FORWARDING`), only Ed25519 and RSA host keys, `sntrup761x25519-sha512@openssh.com` first in `KexAlgorithms`, `ssh.socket` masked.
+- Routines from 05:00: `BORG_TIMER` default 05:00, AIDE check 05:45, `e2scrub_all` Sun 05:30, `fstrim` Mon 05:30 (drop-ins).
+- Borg: daily timer (`BORG_TIMER`), `borg compact` after `prune`, key-line hint with `from=` and `--restrict-to-repository`.
+- fail2ban: no mails on jail start/stop (`sendmail-common.local`), `F2B_IGNOREIP` for trusted networks.
+- Images pinned: `mariadb:11.8`, `redis:7.4-alpine`, `nextcloud-spreed-signaling:2.1.1`. The Janus image `canyan/janus-gateway:latest` was last pushed 2023-05-20 and needs a replacement (open).
+- Static sites (phase 14): owned by root, dot files answered 404, CSP, Referrer-Policy, Permissions-Policy.
+- `KEEP_SNAPD` keeps snapd and Canonical Livepatch.
+
+### Fixed
+- **A re-run of phase 13 broke immo.flow**: `open_basedir` lacked the frontend's credentials file; sendmail, session directory and session cleanup were missing from the pool; the PHP error log could never be written; `SICHERUNG_PFAD` was unset. All part of the phase now.
+- **A re-run of phase 4 removed the alarm mail account and Livepatch; phase 9 dropped the database tuning.**
+- Every **dot file** of the immo.flow web root is blocked (was a hand list), `/userscript/` is reachable again.
+- **Every conversion failed with "Conversion error" (-3).** The bind mounts `data/` and `private/` were root-owned 750, while the services in the container run as user `ds`: EACCES on `Data/runtime.json` and on the converter output. Phase 16 reads uid/gid of `ds` from the image and owns both directories accordingly.
+- **The immo.flow session cookie carried no SameSite attribute.** Phase 13 wrote `session.cookie_samesite = None`; `None` is a reserved INI word and is read as an empty string. The pool now sets `Lax`, which also covers the embedding into Nextcloud because both hosts are the same site. The `verify` check follows.
+- **The Nextcloud DB dump was readable for every local user (644).** `backup-server.sh` and the immo pre-hook now start with `umask 077`; `/var/backups/nc` and `/var/backups/immo` are created 700.
+- **Caddy never received automatic updates.** The cloudsmith repository announces `Origin: cloudsmith/caddy/stable`; the pattern `origin=Caddy` never matched.
+- No bind mount for the document server's log directory - it hid the image's `adminpanel` directory and the container restarted in a loop.
+
 ## [0.6.4] - 2026-10-06
 
 Findings of a two-team review (four independent reviewers) before the rebuild of the production server through cloud-init. None of them aborts a run; each one left `verify` green while something did not work. Nothing in this release has run on a server yet.

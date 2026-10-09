@@ -270,6 +270,16 @@ HOSTNAME_FQDN="${HOSTNAME_FQDN:-}"         # optional FQDN (e.g. server.example.
 # --- Nextcloud (phase 9) ---
 NC_DOMAIN="${NC_DOMAIN:-}"                 # e.g. next.example.com
 NC_IMAGE_TAG="${NC_IMAGE_TAG:-}"           # REQUIRED for phase9: current stable tag from hub.docker.com/_/nextcloud/tags
+# Rev.13: database and cache images pinned to a minor line; buffer pool sized for the box.
+NC_DB_IMAGE="${NC_DB_IMAGE:-mariadb:11.8}"
+NC_REDIS_IMAGE="${NC_REDIS_IMAGE:-redis:7.4-alpine}"
+NC_DB_BUFFER_POOL="${NC_DB_BUFFER_POOL:-1G}"
+# Rev.13: Nextcloud base settings applied by nc-post-setup.sh (set by hand on 2026-10-07).
+NC_PHONE_REGION="${NC_PHONE_REGION:-DE}"
+NC_MAINT_WINDOW="${NC_MAINT_WINDOW:-1}"   # start hour UTC of the 4-hour maintenance window
+NC_LOGLEVEL="${NC_LOGLEVEL:-2}"           # 2 = warning; fail2ban needs <= 2 to see failed logins
+NC_MAIL_FROM="${NC_MAIL_FROM:-}"          # local part, e.g. next (domain = NC_MAIL_DOMAIN)
+NC_MAIL_DOMAIN="${NC_MAIL_DOMAIN:-}"      # e.g. example.com; password in \$SECRETS_IN_DIR/smtp-next
                                            # (take the tag WITHOUT the "-apache" suffix; the base image is already Apache).
                                            # Prefer a digest comparison over trusting the "stable" tag name.
 
@@ -277,6 +287,7 @@ NC_IMAGE_TAG="${NC_IMAGE_TAG:-}"           # REQUIRED for phase9: current stable
 WG_PORT="${WG_PORT:-51820}"
 WG_NET="${WG_NET:-10.8.0}"                 # /24 appended; server = .1, local machine = .2
 WG_CLIENT_PUBKEY="${WG_CLIENT_PUBKEY:-}"   # local machine public key (wg genkey | tee wg.key | wg pubkey)
+WG_PEERS="${WG_PEERS:-}"                   # Rev.13: further peers "name:publickey:lastoctet ..." (3-254)
 
 # --- Mail via msmtp (phase 4) ---
 SMTP_HOST="${SMTP_HOST:-}"                 # e.g. mail.provider.tld
@@ -284,9 +295,32 @@ SMTP_PORT="${SMTP_PORT:-587}"
 SMTP_USER="${SMTP_USER:-}"                 # SMTP login (often the full address)
 SMTP_PASS="${SMTP_PASS:-}"                 # only for a ONE-TIME write to /etc/msmtp-pass (600); then clear it again
 SMTP_FROM="${SMTP_FROM:-}"                 # sender address
+# Rev.13: second sender for application alarms (immo.flow failures), so that a leaked
+# alarm password does not touch the system mailbox and vice versa. Same relay. The
+# password is NOT taken from install.conf: it is read from $SECRETS_IN_DIR/smtp-alarm
+# (one line, no quotes, root 600) or kept from an existing /etc/msmtp-alarm-pass.
+SMTP_ALARM_FROM="${SMTP_ALARM_FROM:-}"     # e.g. alarm@example.com; empty = no alarm account
+SMTP_ALARM_USER="${SMTP_ALARM_USER:-$SMTP_ALARM_FROM}"
+# Rev.13: input secrets live in files, one value per file, read with $(<file) - never
+# sourced as bash, so '$', backticks and quotes in a password stay literal.
+SECRETS_IN_DIR="${SECRETS_IN_DIR:-/root/install-secrets.in}"
+# Rev.13: keep snapd (needed by Canonical Livepatch from Ubuntu Pro). Default no = old behaviour.
+KEEP_SNAPD="${KEEP_SNAPD:-no}"
+# Rev.13: admin password - no expiry, daily reminder mail from this many days after the
+# last change (owner: every 6 months), to this address. Shell idle timeout in seconds.
+ADMIN_PW_REMIND_DAYS="${ADMIN_PW_REMIND_DAYS:-182}"
+ADMIN_PW_REMIND_TO="${ADMIN_PW_REMIND_TO:-${SMTP_ALARM_FROM:-$ADMIN_MAIL}}"
+SHELL_TMOUT="${SHELL_TMOUT:-900}"
+SSH_TCP_FORWARDING="${SSH_TCP_FORWARDING:-no}"   # Rev.13: yes only if SSH tunnels are really used
+# Rev.13: extra networks fail2ban never bans (space separated), e.g. a fixed office prefix.
+F2B_IGNOREIP="${F2B_IGNOREIP:-}"
 
 # --- HDD / Borg backup on the server HDD (phase 9+10) ---
 HDD_MOUNT="${HDD_MOUNT:-/srv/hdd}"         # 4 TB HDD mount point
+# Rev.13: the server backup runs daily on its own (owner's decision 2026-10-09). Before,
+# it waited for a trigger file from the client and fell back to weekly - with the
+# client's key line missing, silo's only archive was three days old on 2026-10-09.
+BORG_TIMER="${BORG_TIMER:-*-*-* 05:00:00}"   # Rev.13: routines from 05:00 (owner decision 2026-10-09)
 NCDATA_DIR="${HDD_MOUNT}/ncdata"           # Nextcloud data dir (blobs, ~1 TB)
 BACKUP_DIR="${HDD_MOUNT}/backup"           # Borg repos: repo-server + repo-local
 
@@ -318,12 +352,15 @@ SWAPFILE_SIZE_GB="${SWAPFILE_SIZE_GB:-0}"
 # --- Rev.10: phase 13, immo.flow (second PHP project, own MariaDB) ---
 # Default off: an existing installation must behave exactly as before.
 ENABLE_IMMO="${ENABLE_IMMO:-no}"
-IMMO_DOMAIN="${IMMO_DOMAIN:-}"             # e.g. immo.example.com
+IMMO_DOMAIN="${IMMO_DOMAIN:-}"             # e.g. "immo.example.com" - Rev.13: several names, space or comma separated
 IMMO_DIR="${IMMO_DIR:-/srv/immo}"
 IMMO_USER="${IMMO_USER:-immo}"
 IMMO_DB="${IMMO_DB:-immo}"
 IMMO_DB_USER="${IMMO_DB_USER:-immo-user}"
 IMMO_RUN_TIME="${IMMO_RUN_TIME:-15:00}"    # systemd OnCalendar time, server timezone
+# Rev.13: the online check (online.py) was added by hand on silo on 2026-10-07; empty = off.
+IMMO_ONLINE_TIMES="${IMMO_ONLINE_TIMES:-07:00 19:00}"
+IMMO_ALARM_TO="${IMMO_ALARM_TO:-${SMTP_ALARM_FROM:-$ADMIN_MAIL}}"   # recipient of failure mails
 # Playwright/Chromium system libraries: ~400 MB on disk, ~1 GB RAM while running.
 # Only needed if the scrapers run ON THE SERVER instead of on the local machine.
 ENABLE_IMMO_PLAYWRIGHT="${ENABLE_IMMO_PLAYWRIGHT:-no}"
@@ -352,6 +389,25 @@ JANUS_RTP_MAX="${JANUS_RTP_MAX:-20100}"
 # Janus has no image published by the Nextcloud project. UNVERIFIED default -
 # check it against the upstream repository before the first run.
 JANUS_IMAGE="${JANUS_IMAGE:-canyan/janus-gateway:latest}"
+# Rev.13: measured on Docker Hub 2026-10-09 - canyan/janus-gateway:latest was last pushed
+# 2023-05-20, 'master' 2024-05-06: the image is unmaintained. Replace it before the next
+# phase-15 run (open decision). The signaling server is pinned to its release line.
+SIGNALING_IMAGE="${SIGNALING_IMAGE:-strukturag/nextcloud-spreed-signaling:2.1.1}"
+NATS_IMAGE="${NATS_IMAGE:-nats:2-alpine}"
+
+# --- Rev.13: phase 16, Euro-Office document server for Nextcloud ---
+# Tags start with "v" (v9.3.4-hotfix.1, not 9.3.4). List of published tags:
+# https://github.com/orgs/Euro-Office/packages/container/documentserver/versions
+ENABLE_OFFICE="${ENABLE_OFFICE:-no}"
+EO_DOMAIN="${EO_DOMAIN:-}"                 # e.g. office.example.com, own A/AAAA record
+EO_IMAGE="${EO_IMAGE:-ghcr.io/euro-office/documentserver:v9.3.4-hotfix.1}"
+EO_DIR="${EO_DIR:-/srv/eurooffice}"
+EO_PORT="${EO_PORT:-8890}"                 # loopback only, Caddy proxies to it
+EO_MEM_LIMIT="${EO_MEM_LIMIT:-6g}"
+
+# --- Rev.13: phase 17, ClamAV for uploads to Nextcloud ("Antivirus for files") ---
+ENABLE_CLAMAV="${ENABLE_CLAMAV:-no}"
+AV_INFECTED_ACTION="${AV_INFECTED_ACTION:-only_log}"   # only_log | delete
 
 # Fail early if the personal config was not loaded (skip when only showing usage):
 if [[ -n "${1:-}" && "${1:-}" != "usage" && -z "$ADMIN_USER" ]]; then
@@ -439,12 +495,35 @@ CADDY_CONFD="/etc/caddy/conf.d"
 write_caddy_base() {
     install -d -m 755 "$CADDY_CONFD"
     backup_file /etc/caddy/Caddyfile
+    # Rev.13: access log per site (audit finding P20: no Caddy access log). Every site
+    # block starts with 'import protokoll <name>'. Caddy rolls the files itself;
+    # its own error log stays in the journal (journalctl -u caddy).
+    install -d -o caddy -g caddy -m 750 /var/log/caddy
     cat > /etc/caddy/Caddyfile <<EOF
 # Managed by install.sh - do not edit by hand.
 # One file per site in $CADDY_CONFD (phases 9, 13, 14).
+# Access log per site as JSON, rotated by Caddy itself, kept 30 days.
+# Caddy's own error log stays in the journal: journalctl -u caddy
+(protokoll) {
+    log {
+        output file /var/log/caddy/{args[0]}.log {
+            roll_size 50MiB
+            roll_keep 10
+            roll_keep_for 720h
+            mode 0640
+        }
+        format json
+    }
+}
 import $CADDY_CONFD/*.caddy
 EOF
     chmod 644 /etc/caddy/Caddyfile          # must be readable by user 'caddy' (Review K3)
+}
+
+caddy_log_owner() {
+    # 'caddy validate' runs as root and opens the log files - a new file is then owned
+    # by root and the reload as user caddy fails (seen on silo 2026-10-09).
+    chown caddy:caddy /var/log/caddy/*.log 2>/dev/null || true
 }
 
 write_caddy_nextcloud() {
@@ -460,6 +539,7 @@ write_caddy_nextcloud() {
     fi
     cat > "$CADDY_CONFD/10-nextcloud.caddy" <<EOF
 $NC_DOMAIN {
+    import protokoll next
     header Strict-Transport-Security "max-age=15552000; includeSubDomains"
     redir /.well-known/carddav /remote.php/dav/ 301
     redir /.well-known/caldav  /remote.php/dav/ 301
@@ -474,6 +554,7 @@ EOF
 
 caddy_apply() {  # validate, then reload - never leave a broken config running
     caddy validate --config /etc/caddy/Caddyfile || die "Caddyfile invalid - nothing reloaded."
+    caddy_log_owner
     systemctl reload caddy 2>/dev/null || systemctl restart caddy
 }
 
@@ -721,15 +802,23 @@ ClientAliveInterval 300
 ClientAliveCountMax 2
 X11Forwarding no
 AllowAgentForwarding no
-AllowTcpForwarding yes
+# Rev.13: off by default (Lynis SSH-7408, ssh-audit 2026-10-09) - WireGuard is the way
+# into the private services; SSH_TCP_FORWARDING=yes restores the old behaviour.
+AllowTcpForwarding $SSH_TCP_FORWARDING
 LogLevel VERBOSE
+# Rev.13: only Ed25519 and RSA host keys. ssh-audit (2026-10-09) failed the NIST P-256
+# ECDSA key; leaving out its HostKey line stops sshd from offering it.
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
 # Rev.5 (S.1.e) - extra hardening. The whole file is REWRITTEN via cat,
 # so there is no duplicate-directive risk (the first-value-wins trap is avoided):
 HostbasedAuthentication no
 IgnoreRhosts yes
 PermitUserEnvironment no
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com
-KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org
+# Rev.13: hybrid post-quantum key exchange first (OpenSSH >= 8.5; Ubuntu 24.04 has 9.6),
+# recommended by ssh-audit; curve25519 stays for older clients.
+KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 # Rev.8 (CIS sshd_enable_warning_banner_net): without this line the legal text
 # written to /etc/issue.net in phase 5 is NEVER shown on an SSH login - the file
@@ -750,6 +839,9 @@ EOF
 
     # Ubuntu 24.04: socket activation off, classic service on (unambiguous port handling)
     systemctl disable --now ssh.socket 2>/dev/null || true
+    # Rev.13: masked, not only disabled - a package update can re-enable a disabled
+    # socket unit and bring socket activation (and its own port handling) back.
+    systemctl mask ssh.socket 2>/dev/null || true
     systemctl daemon-reload
     systemctl enable ssh.service
     systemctl restart ssh.service
@@ -800,6 +892,9 @@ phase4() {
     # Use our own 52* file instead of editing 50* (50 belongs to the package, replaced on updates)
     # The Origins-Pattern adds the Docker and Caddy third-party repos (Review M1): otherwise
     # docker-ce/containerd/caddy would NEVER get automatic security patches.
+    # Rev.13: the Caddy repository on cloudsmith announces itself as
+    # "Origin: cloudsmith/caddy/stable", not "Caddy" - the old pattern never matched and
+    # Caddy got no automatic updates (measured in the Release file on silo 2026-10-09).
     cat > /etc/apt/apt.conf.d/52unattended-upgrades-local <<EOF
 Unattended-Upgrade::Automatic-Reboot "false";
 Unattended-Upgrade::Mail "$ADMIN_MAIL";
@@ -808,7 +903,7 @@ Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Origins-Pattern {
     "origin=Docker";
-    "origin=Caddy";
+    "origin=cloudsmith/caddy/stable";
     "origin=CISOfy";  # only effective if the CISOfy repo was set up (Lynis itself is
                       # installed by this script in phase 4; see the CISOfy repo step below)
 };
@@ -831,6 +926,29 @@ EOF
             || warn "CISOfy repo not set up - Lynis would come from universe (3.0.9). Check network/key."
     fi
     apt-get install -y -q lynis || warn "Lynis installation failed."
+    # Rev.13: deliberate exceptions, each with its reason - the index then measures only
+    # what is really open (audit 2026-10-09, Werkzeuge-und-Haertungsvorschlaege section 3).
+    install -d /etc/lynis
+    cat > /etc/lynis/custom.prf <<'EOF'
+# /etc/lynis/custom.prf - deliberate exceptions (install.sh Rev.13)
+# MaxSessions/TCPKeepAlive: ClientAliveInterval is set, little gain
+skip-test=SSH-7408:maxsessions
+skip-test=SSH-7408:tcpkeepalive
+# /home and /var on separate partitions: only possible on a fresh install
+skip-test=FILE-6310
+# process accounting: auditd covers it
+skip-test=ACCT-9622
+# apt-show-versions: no security value
+skip-test=PKGS-7394
+# unused iptables rules: Docker chains
+skip-test=FIRE-4513
+# automation tool: install.sh is the tool
+skip-test=TOOL-5002
+# AIDE 'Checksums = H' includes SHA512 - false alarm
+skip-test=FINT-4402
+# password ageing: no forced expiry (NIST SP 800-63B), reminder via admin-pw-reminder
+skip-test=AUTH-9286
+EOF
 
     if [[ -n "$SMTP_HOST" && -n "$SMTP_USER" ]]; then
         # Password NOT in msmtprc but in a separate 600 file via passwordeval (Review M1)
@@ -876,6 +994,28 @@ user $SMTP_USER
 passwordeval cat /etc/msmtp-pass
 aliases /etc/aliases
 EOF
+        # Rev.13: a re-run of phase 4 used to rewrite msmtprc with the default account
+        # only - the hand-made account 'alarm' (immo.flow failure mails) vanished and
+        # immo-fail-mail@.service failed silently. The alarm account is now part of it.
+        if [[ -n "$SMTP_ALARM_FROM" ]]; then
+            if [[ -s "$SECRETS_IN_DIR/smtp-alarm" ]]; then
+                install -m 600 /dev/null /etc/msmtp-alarm-pass
+                printf '%s\n' "$(<"$SECRETS_IN_DIR/smtp-alarm")" > /etc/msmtp-alarm-pass
+            fi
+            if [[ -s /etc/msmtp-alarm-pass ]]; then
+                cat >> /etc/msmtprc <<EOF
+
+account alarm
+host $SMTP_HOST
+port $SMTP_PORT
+from $SMTP_ALARM_FROM
+user $SMTP_ALARM_USER
+passwordeval cat /etc/msmtp-alarm-pass
+EOF
+            else
+                warn "SMTP_ALARM_FROM set, but neither $SECRETS_IN_DIR/smtp-alarm nor /etc/msmtp-alarm-pass exists - no alarm account."
+            fi
+        fi
         chmod 600 /etc/msmtprc
         append_once "root: $ADMIN_MAIL" /etc/aliases
         append_once "default: $ADMIN_MAIL" /etc/aliases
@@ -888,7 +1028,16 @@ EOF
 
     # Drop ballast (attack surface/RAM). Stock images ship snapd+core+lxd (Review M6):
     systemctl disable --now ModemManager 2>/dev/null || true
-    if command -v snap &>/dev/null; then
+    # Rev.13: Canonical Livepatch (Ubuntu Pro) is itself a snap. Removing snapd here
+    # silently ended kernel live patching on a re-run - on silo Livepatch was attached
+    # after the first run. KEEP_SNAPD=yes keeps snapd, its base and canonical-livepatch.
+    if [[ "$KEEP_SNAPD" == "yes" ]] && command -v snap &>/dev/null; then
+        snap remove --purge lxd 2>/dev/null || true
+        for s in $(snap list 2>/dev/null | awk 'NR>1 && $1!~/^(snapd|core|core2[0-9]|canonical-livepatch)$/ {print $1}'); do
+            snap remove --purge "$s" 2>/dev/null || warn "Snap '$s' not removed - check manually."
+        done
+        log "snapd kept (KEEP_SNAPD=yes), Livepatch untouched."
+    elif command -v snap &>/dev/null; then
         snap remove --purge lxd 2>/dev/null || true
         for s in $(snap list 2>/dev/null | awk 'NR>1 && $1!="snapd" && $1!="core" {print $1}'); do
             snap remove --purge "$s" 2>/dev/null || warn "Snap '$s' not removed - check manually."
@@ -898,6 +1047,56 @@ EOF
         apt-get purge -y -q snapd 2>/dev/null && log "snapd removed." || warn "snapd not removed - check manually (snap list)."
     fi
     log "Phase 4 done."
+}
+
+admin_pw_reminder() {  # Rev.13: own function so restinstall.sh can apply it alone
+    # Rev.13 (owner's decision 2026-10-09): the admin password does NOT expire. With
+    # 'chage -M 365' sudo would demand a new password unannounced after a year; the
+    # warning only shows in interactive logins, which hardly happen (all work runs
+    # through scripts that take the password from the Mac keychain). Instead a daily
+    # reminder mail starts ADMIN_PW_REMIND_DAYS after the last change and repeats every
+    # day until the password is changed - never a lock-out. NIST SP 800-63B Rev.4,
+    # 3.1.1.2: "SHALL NOT require subscribers to change passwords periodically".
+    chage -M -1 -m 1 -W 14 "$ADMIN_USER" 2>/dev/null || true
+    install -d -m 755 /usr/local/sbin
+    cat > /usr/local/sbin/admin-pw-reminder.sh <<EOF
+#!/bin/bash
+# Daily reminder to change the password of $ADMIN_USER (install.sh phase 5, Rev.13).
+# Sends nothing until $ADMIN_PW_REMIND_DAYS days after the last change; then one mail a day.
+set -euo pipefail
+last=\$(getent shadow '$ADMIN_USER' | cut -d: -f3)
+[[ "\$last" =~ ^[0-9]+\$ ]] || exit 0
+age=\$(( \$(date +%s) / 86400 - last ))
+(( age >= $ADMIN_PW_REMIND_DAYS )) || exit 0
+subj='# # # # #  - -  S I L O  - -  P A S S W O R T  - -  Ä N D E R N  - -   # # # # #'
+acct=default; grep -q '^account alarm' /etc/msmtprc 2>/dev/null && acct=alarm
+{
+  printf 'To: %s\n' '$ADMIN_PW_REMIND_TO'
+  printf 'Subject: =?UTF-8?B?%s?=\n' "\$(printf '%s' "\$subj" | base64 -w0)"
+  printf 'MIME-Version: 1.0\nContent-Type: text/html; charset=UTF-8\nContent-Transfer-Encoding: 8bit\n\n'
+  printf '<html><body><div style="text-align:center;font-family:Verdana,sans-serif;font-weight:bold;font-size:96px;line-height:1.2">Passwort<br>ändern</div>'
+  printf '<p style="text-align:center;font-family:Verdana,sans-serif;font-size:12px">%s auf %s, letzte Änderung vor %s Tagen.</p></body></html>\n' '$ADMIN_USER' "\$(hostname -f)" "\$age"
+} | /usr/bin/msmtp -a "\$acct" '$ADMIN_PW_REMIND_TO'
+EOF
+    chmod 700 /usr/local/sbin/admin-pw-reminder.sh
+    cat > /etc/systemd/system/admin-pw-reminder.service <<'EOF'
+[Unit]
+Description=Reminder to change the admin password
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/admin-pw-reminder.sh
+EOF
+    cat > /etc/systemd/system/admin-pw-reminder.timer <<'EOF'
+[Unit]
+Description=Daily check whether the admin password is due for a change
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now admin-pw-reminder.timer
 }
 
 # ================ PHASE 5: KERNEL, NETWORK, FILESYSTEM HARDENING ============
@@ -1208,8 +1407,8 @@ Unauthorised use is prohibited and will be prosecuted.
 BANNEREOF
     cp /etc/issue /etc/issue.net
     chmod 644 /etc/issue /etc/issue.net
-    chage -M 365 -m 1 -W 14 "$ADMIN_USER" 2>/dev/null || true
-    printf 'TMOUT=900\nreadonly TMOUT\nexport TMOUT\n' > /etc/profile.d/99-tmout.sh; chmod 644 /etc/profile.d/99-tmout.sh
+    admin_pw_reminder
+    printf 'TMOUT=%s\nreadonly TMOUT\nexport TMOUT\n' "$SHELL_TMOUT" > /etc/profile.d/99-tmout.sh; chmod 644 /etc/profile.d/99-tmout.sh
     printf 'umask 027\n' > /etc/profile.d/99-umask.sh; chmod 644 /etc/profile.d/99-umask.sh
     # su only for members of the sudo group - ONLY if the admin is in it (else lock-out risk):
     if id -nG "$ADMIN_USER" | grep -qw sudo; then
@@ -1231,7 +1430,10 @@ phase6() {
     # Rev.5 (B1): enable IPv6 bans globally + never ban our own WG net + loopback:
     printf '[Definition]\nallowipv6 = auto\n' > /etc/fail2ban/fail2ban.local
     install -d /etc/fail2ban/jail.d
-    printf '[DEFAULT]\nignoreip = 127.0.0.1/8 ::1 %s.0/24\n' "$WG_NET" > /etc/fail2ban/jail.d/00-ignoreip.local
+    # Rev.13: F2B_IGNOREIP takes further trusted networks, e.g. the fixed IPv6 prefix of the
+    # office line. On 2026-10-01 and -03 the nextcloud jail banned the owner's own office
+    # address - and IPv6 bans hit the whole /64, i.e. every device in the office.
+    printf '[DEFAULT]\nignoreip = 127.0.0.1/8 ::1 %s.0/24 %s\n' "$WG_NET" "$F2B_IGNOREIP" > /etc/fail2ban/jail.d/00-ignoreip.local
 
     # Council-Fix 7: fail2ban bans IPv6 only as /128 - but an attacker usually has
     # a whole /64 and simply rotates the address. Extra action:
@@ -1296,6 +1498,10 @@ logpath  = /var/log/fail2ban.log
 bantime  = 2w
 findtime = 1d
 EOF
+    # Rev.13: action_mw also mails every jail start and stop - 195 of 264 server mails
+    # between 2026-09-29 and 10-09 were such notices, burying the two real bans. Only
+    # bans are mailed now; start and stop stay in the fail2ban log.
+    printf '[Definition]\nactionstart =\nactionstop =\n' > /etc/fail2ban/action.d/sendmail-common.local
     apt-get install -y -q whois   # for action_mw (whois in the ban mail)
     systemctl enable --now fail2ban
     systemctl restart fail2ban
@@ -1453,13 +1659,32 @@ PresharedKey = $WG_PSK
 AllowedIPs   = ${WG_NET}.2/32
 EOF
     fi
+    # Rev.13: further devices (iPhone, laptop). Before, wg0.conf was rewritten with the
+    # one peer only, so a second device vanished on every re-run of phase 8.
+    # Format: "name:publickey:lastoctet ..." - e.g. "iphone:AbC...=:3".
+    local peer pname ppub poct
+    for peer in $WG_PEERS; do
+        IFS=: read -r pname ppub poct <<<"$peer"
+        [[ -n "$ppub" && "$poct" =~ ^[0-9]+$ && "$poct" -ge 3 && "$poct" -le 254 ]] \
+            || die "WG_PEERS entry '$pname' invalid - format name:publickey:lastoctet (3-254)."
+        cat >> /etc/wireguard/wg0.conf <<EOF
+
+[Peer]
+# $pname
+PublicKey    = $ppub
+PresharedKey = $WG_PSK
+AllowedIPs   = ${WG_NET}.$poct/32
+EOF
+    done
     chmod 600 /etc/wireguard/wg0.conf /etc/wireguard/server.key /etc/wireguard/wg0.psk
 
     ufw allow "${WG_PORT}/udp" comment 'WireGuard'
     # Re-run: reload the config if the interface is already up, otherwise a
     # changed peer/PSK only takes effect after a manual restart (Review N4).
     if systemctl is-active --quiet wg-quick@wg0; then
-        systemctl restart wg-quick@wg0
+        # Rev.13: syncconf instead of restart - a restart cut every tunnel, including a
+        # Borg run or an SSH session from the client in progress.
+        wg syncconf wg0 <(wg-quick strip wg0) || systemctl restart wg-quick@wg0
     else
         systemctl enable --now wg-quick@wg0
     fi
@@ -1599,17 +1824,19 @@ EOF
     write_caddy_base
     write_caddy_nextcloud
     caddy validate --config /etc/caddy/Caddyfile || die "Caddyfile invalid."
+    caddy_log_owner
 
     # === Council-Fix 8: DNS gate BEFORE Caddy start (Rev.10: extracted to dns_gate) ===
     dns_gate "$NC_DOMAIN"
 
     # Rev.5 (B6): lock Caddy into a systemd sandbox (markedly lowers the Lynis exposure).
-    # CAP_NET_BIND_SERVICE for 80/443; ReadWritePaths only the cert/state directory.
+    # CAP_NET_BIND_SERVICE for 80/443; ReadWritePaths only the cert/state directory
+    # and, since Rev.13, the access logs (without it the reload fails: read-only file system).
     install -d /etc/systemd/system/caddy.service.d
     cat > /etc/systemd/system/caddy.service.d/hardening.conf <<'EOF'
 [Service]
 ProtectSystem=strict
-ReadWritePaths=/var/lib/caddy
+ReadWritePaths=/var/lib/caddy /var/log/caddy
 ProtectHome=true
 PrivateDevices=true
 ProtectKernelTunables=true
@@ -1630,7 +1857,7 @@ EOF
     systemctl daemon-reload
 
     systemctl enable --now caddy
-    systemctl reload caddy
+    systemctl restart caddy     # Rev.13: a changed sandbox only takes effect on restart
 
     # --- 4TB HDD: NC data dir + backup repos (NEXT TO the NC dir) ---
     # Set up the HDD once beforehand (check the device name with 'lsblk'!). Use UUID
@@ -1755,14 +1982,24 @@ EOF
     install -m 600 "$SECRETS_DIR/nc-db-pass"    /srv/nextcloud/secrets/db_pass.txt
     install -m 600 "$SECRETS_DIR/nc-admin-pass" /srv/nextcloud/secrets/nc_admin.txt
 
+    # Rev.13: with ENABLE_CLAMAV the host's clamd socket is mounted read-only into the
+    # Nextcloud containers (upload scan in app, background scan in cron) - phase 17.
+    local NC_CLAMAV_MOUNT=""
+    if [[ "$ENABLE_CLAMAV" == "yes" ]]; then
+        NC_CLAMAV_MOUNT=$'\n      - /var/run/clamav:/var/run/clamav:ro'
+    fi
     cat > /srv/nextcloud/docker-compose.yml <<EOF
 services:
   db:
-    image: mariadb:11
+    # Rev.13: pinned to the LTS line. 'mariadb:11' followed every 11.x feature release
+    # and would have upgraded the Nextcloud database unannounced on the next pull.
+    image: $NC_DB_IMAGE
     restart: unless-stopped
-    mem_limit: 2g                                # Rev.5 (B5): DoS containment, sized for a 16 GB prod box
+    mem_limit: 2g                                # Rev.5 (B5): DoS containment
     pids_limit: 256
-    command: --transaction-isolation=READ-COMMITTED
+    # Rev.13: the tuning set by hand on silo on 2026-10-07 (log file size, slow-query
+    # log) is part of the template now - a re-run of phase 9 used to drop it.
+    command: --transaction-isolation=READ-COMMITTED --innodb-log-file-size=256M --innodb-buffer-pool-size=$NC_DB_BUFFER_POOL --slow-query-log=1 --long-query-time=2
     security_opt: [ "no-new-privileges:true" ]   # Review M2
     volumes:
       - ./db:/var/lib/mysql
@@ -1779,7 +2016,7 @@ services:
       retries: 12
 
   redis:
-    image: redis:7-alpine
+    image: $NC_REDIS_IMAGE
     restart: unless-stopped
     mem_limit: 256m                              # Rev.5 (B5)
     pids_limit: 64
@@ -1804,7 +2041,7 @@ services:
       redis: { condition: service_started }
     volumes:
       - ./html:/var/www/html
-      - ${NCDATA_DIR}:/var/www/html/data   # data dir = HDD, separate from the NC dir
+      - ${NCDATA_DIR}:/var/www/html/data   # data dir = HDD, separate from the NC dir$NC_CLAMAV_MOUNT
     environment:
       MYSQL_HOST: db
       MYSQL_DATABASE: nextcloud
@@ -1834,7 +2071,7 @@ services:
       redis: { condition: service_started }
     volumes:
       - ./html:/var/www/html
-      - ${NCDATA_DIR}:/var/www/html/data
+      - ${NCDATA_DIR}:/var/www/html/data$NC_CLAMAV_MOUNT
 
 secrets:
   db_root:  { file: ./secrets/db_root.txt }
@@ -1895,8 +2132,71 @@ $OCC app:install twofactor_totp 2>/dev/null || $OCC app:enable twofactor_totp
 $OCC twofactorauth:enforce --on
 $OCC twofactorauth:enforce
 echo "2FA is now ENFORCED - the next login of every account will require TOTP setup."
+
+# Rev.13: base settings that were set by hand on 2026-10-07 and missing after every
+# fresh install (Nextcloud admin overview warnings). Idempotent - safe to run again.
+# Values come from install.conf via /etc/nc-post-setup.env (no secrets in it).
+. /etc/nc-post-setup.env
+$OCC config:system:set default_phone_region --value="$NC_PHONE_REGION"
+$OCC config:system:set maintenance_window_start --type=integer --value="$NC_MAINT_WINDOW"
+$OCC config:system:set loglevel --type=integer --value="$NC_LOGLEVEL"
+$OCC app:disable app_api 2>/dev/null || true
+$OCC db:add-missing-indices
+$OCC db:add-missing-columns
+$OCC db:add-missing-primary-keys
+$OCC db:convert-filecache-bigint --no-interaction
+$OCC maintenance:repair --include-expensive
+if [[ -n "$NC_MAIL_FROM" && -n "$NC_MAIL_DOMAIN" && -s "$SECRETS_IN_DIR/smtp-next" ]]; then
+    $OCC config:system:set mail_smtpmode --value=smtp
+    $OCC config:system:set mail_smtphost --value="$SMTP_HOST"
+    $OCC config:system:set mail_smtpport --type=integer --value="$SMTP_PORT"
+    $OCC config:system:set mail_smtpsecure --value=''
+    $OCC config:system:set mail_smtpauth --type=boolean --value=true
+    $OCC config:system:set mail_from_address --value="$NC_MAIL_FROM"
+    $OCC config:system:set mail_domain --value="$NC_MAIL_DOMAIN"
+    $OCC config:system:set mail_smtpname --value="$NC_MAIL_FROM@$NC_MAIL_DOMAIN"
+    $OCC config:system:set mail_smtppassword --value="$(<"$SECRETS_IN_DIR/smtp-next")" >/dev/null
+    echo "Nextcloud mail: $NC_MAIL_FROM@$NC_MAIL_DOMAIN via $SMTP_HOST:$SMTP_PORT (STARTTLS)."
+else
+    echo "Nextcloud mail NOT configured (NC_MAIL_FROM/NC_MAIL_DOMAIN or $SECRETS_IN_DIR/smtp-next missing)."
+fi
+# Rev.13: preview generator (timer nc-preview, 06:15) and External sites (immo.flow
+# inside Nextcloud); the site entries themselves are set by hand in the admin settings.
+$OCC app:install previewgenerator 2>/dev/null || $OCC app:enable previewgenerator
+$OCC app:install external 2>/dev/null || $OCC app:enable external
+$OCC setupchecks || true
 EOF
     chmod 700 /usr/local/bin/nc-post-setup.sh
+    cat > /etc/systemd/system/nc-preview.service <<'EOF'
+[Unit]
+Description=Nextcloud: generate previews for new files
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec -u www-data nextcloud-app-1 php occ preview:pre-generate
+EOF
+    cat > /etc/systemd/system/nc-preview.timer <<'EOF'
+[Unit]
+Description=Nextcloud: previews daily 06:15
+
+[Timer]
+OnCalendar=*-*-* 06:15:00
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable nc-preview.timer
+    {
+        printf 'NC_PHONE_REGION=%q\nNC_MAINT_WINDOW=%q\nNC_LOGLEVEL=%q\n' "$NC_PHONE_REGION" "$NC_MAINT_WINDOW" "$NC_LOGLEVEL"
+        printf 'NC_MAIL_FROM=%q\nNC_MAIL_DOMAIN=%q\nSMTP_HOST=%q\nSMTP_PORT=%q\nSECRETS_IN_DIR=%q\n' \
+            "$NC_MAIL_FROM" "$NC_MAIL_DOMAIN" "$SMTP_HOST" "$SMTP_PORT" "$SECRETS_IN_DIR"
+    } > /etc/nc-post-setup.env
+    chmod 600 /etc/nc-post-setup.env
 
     log "Compose file: /srv/nextcloud/docker-compose.yml"
     log "NC admin: user '$ADMIN_USER', password in $SECRETS_DIR/nc-admin-pass"
@@ -1948,7 +2248,9 @@ phase10() {
     log "  ssh-keygen -t ed25519 -a 64 -f ~/.ssh/vps_borg      -C 'mac-borg-append-only'"
     log "  ssh-keygen -t ed25519 -a 64 -f ~/.ssh/vps_trigger   -C 'mac-borg-trigger'"
     log "Then on the SERVER add to /home/${ADMIN_USER}/.ssh/authorized_keys (one line each):"
-    log "  command=\"borg serve --append-only --restrict-to-path ${BACKUP_DIR}/repo-local\",restrict,no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding <INHALT vps_borg.pub>"
+    # Rev.13: --restrict-to-repository (stricter than -path) and from= the WireGuard peer,
+    # as running on silo since 2026-10-07; the client reaches the repo only through the tunnel.
+    log "  from=\"${WG_NET}.2\",command=\"borg serve --restrict-to-repository ${BACKUP_DIR}/repo-local --append-only\",restrict <public key of the client>"
     log "  command=\"touch ${BACKUP_DIR}/trigger/.run-backup\",restrict,no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding <INHALT vps_trigger.pub>"
     log "The backup chain then uses:  borg ... -e 'ssh -i ~/.ssh/vps_borg'  &&  ssh -i ~/.ssh/vps_trigger vps"
     log "Prune on repo-local runs ONLY manually from the local machine (the append-only key cannot prune) - use the admin key or a third full-access key."
@@ -1957,6 +2259,10 @@ phase10() {
     cat > /usr/local/bin/backup-server.sh <<EOF
 #!/bin/bash
 # Server backup -> HDD repo. Event-triggered (path unit) or weekly fallback.
+# Rev.13: without umask the Nextcloud DB dump came out 644 under systemd's default
+# umask - the password hashes of every account were readable for all local users
+# (measured on the production server 2026-10-09).
+umask 077
 set -euo pipefail
 rm -f "$BACKUP_DIR/trigger/.run-backup"
 export BORG_PASSCOMMAND='cat /root/.borg-passphrase'
@@ -1972,7 +2278,7 @@ if [[ -d /usr/local/lib/backup-pre.d ]]; then
     done
 fi
 
-mkdir -p /var/backups/nc
+install -d -m 700 /var/backups/nc
 NC_RUNNING=0
 if \$COMPOSE ps -q app 2>/dev/null | grep -q .; then
     NC_RUNNING=1
@@ -2007,6 +2313,9 @@ fi
 
 # Cleanup + integrity check (repo is local - prune may run here):
 borg prune --keep-daily 7 --keep-weekly 4 --keep-monthly 6 "\$REPO"
+# Rev.13: from Borg 1.2 on, prune only marks segments; without compact the repository
+# never shrinks.
+borg compact "\$REPO"
 borg check --repository-only "\$REPO"
 EOF
     chmod 700 /usr/local/bin/backup-server.sh
@@ -2042,13 +2351,13 @@ PathExists=$BACKUP_DIR/trigger/.run-backup
 [Install]
 WantedBy=multi-user.target
 EOF
-    # Fallback net: if no trigger comes for weeks, a backup still runs once a week:
-    cat > /etc/systemd/system/borg-backup.timer <<'EOF'
+    # Rev.13: daily run on the server's own schedule; the trigger file stays as an extra.
+    cat > /etc/systemd/system/borg-backup.timer <<EOF
 [Unit]
-Description=Borg backup fallback (weekly)
+Description=Borg backup of the server (daily)
 [Timer]
-OnCalendar=weekly
-RandomizedDelaySec=6h
+OnCalendar=$BORG_TIMER
+RandomizedDelaySec=5min
 Persistent=true
 [Install]
 WantedBy=timers.target
@@ -2057,7 +2366,7 @@ EOF
     systemctl enable --now borg-backup.path borg-backup.timer
 
     log "Initialise the repo for the LOCAL machine once (from the local machine):"
-    log "  borg init --encryption=repokey-blake2 ssh://${ADMIN_USER}@<server-ip>:${SSH_PORT}${BACKUP_DIR}/repo-local"
+    log "  borg init --encryption=repokey-blake2 ssh://${ADMIN_USER}@${WG_NET}.1:${SSH_PORT}${BACKUP_DIR}/repo-local"
     log "Backup chain afterwards:  borg create ... && ssh vps 'touch ${BACKUP_DIR}/trigger/.run-backup'"
     log "Phase 10 done. Do not forget the restore test (borg mount + spot check)!"
 }
@@ -2238,6 +2547,11 @@ phase12() {
     install -d /etc/aide/aide.conf.d
     printf '!/var/lib/docker\n!/var/lib/containerd\n!%s\n!/srv/nextcloud/html\n!/srv/nextcloud/db\n!/var/lib/disk-space-alert\n!/proc\n!/sys\n!/run\n' \
         "$HDD_MOUNT" > /etc/aide/aide.conf.d/99_local_excludes
+    # Rev.13: directories that change every day by design - without them the daily AIDE
+    # report is noise and a real change drowns in it.
+    printf '!/var/lib/mysql\n!/var/backups\n!/var/lib/php/sessions\n!%s\n!%s\n!%s\n!%s\n!%s\n!%s\n!/srv/eurooffice/data\n!/srv/eurooffice/private\n' \
+        "$IMMO_DIR/.venv" "$IMMO_DIR/.cache" "$IMMO_DIR/sessions" "$IMMO_DIR/sicherung" "$IMMO_DIR/daten" "$IMMO_DIR/protokolle" \
+        >> /etc/aide/aide.conf.d/99_local_excludes
     cat > /etc/aide/aide.conf.d/99_local_audittools <<'EOF'
 /usr/sbin/auditctl   p+i+n+u+g+s+b+acl+xattrs+sha512
 /usr/sbin/auditd     p+i+n+u+g+s+b+acl+xattrs+sha512
@@ -2247,6 +2561,20 @@ phase12() {
 /usr/sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512
 EOF
     warn "AIDE init is running now (several minutes, 100% CPU + high RAM) - do NOT abort, not a hang."
+    # Rev.13: routines from 05:00 (owner decision 2026-10-09), staggered after Borg
+    # (BORG_TIMER, 05:00). Drop-ins keep the package units untouched.
+    local t
+    for t in "dailyaidecheck.timer|*-*-* 05:45:00" "e2scrub_all.timer|Sun *-*-* 05:30:00" "fstrim.timer|Mon *-*-* 05:30:00"; do
+        install -d "/etc/systemd/system/${t%%|*}.d"
+        printf '[Timer]\nOnCalendar=\nOnCalendar=%s\nRandomizedDelaySec=5min\n' "${t#*|}" \
+            > "/etc/systemd/system/${t%%|*}.d/10-zeit.conf"
+    done
+    systemctl daemon-reload
+
+    # Rev.13: cloud-init has done its job after the first boot; switched off so that a
+    # changed userData at the provider can never rewrite the running server.
+    [[ -d /etc/cloud ]] && touch /etc/cloud/cloud-init.disabled
+
     aideinit -y -f 2>&1 | tail -3 || warn "aideinit reported an error - check /var/log."
     log "Phase 12 done. AIDE DB at /var/lib/aide/aide.db."
 }
@@ -2384,7 +2712,9 @@ pm = ondemand
 pm.max_children = 10
 pm.process_idle_timeout = 60s
 pm.max_requests = 500
-php_admin_value[open_basedir] = $IMMO_DIR:$HDD_MOUNT/immo:/tmp:/usr/share/php
+; Rev.13: the frontend's own credentials file was outside open_basedir - without the
+; hand fix of 2026-10-07 the web side could not read its database password.
+php_admin_value[open_basedir] = $IMMO_DIR:$HDD_MOUNT/immo:/tmp:/usr/share/php:$IMMO_WEB_ENV
 php_admin_value[upload_tmp_dir] = /tmp
 php_admin_value[memory_limit] = 256M
 php_admin_value[post_max_size] = 32M
@@ -2396,27 +2726,89 @@ php_admin_flag[expose_php] = off
 ; and no later code edit can silently drop them again.
 php_admin_value[session.cookie_secure] = 1
 php_admin_value[session.cookie_httponly] = 1
-php_admin_value[session.cookie_samesite] = None
+; Rev.13: "None" is a reserved INI word and is read as an empty string, so the cookie
+; carried no SameSite attribute at all (measured on the production server 2026-10-09;
+; Safari and Firefox then treat it as None). Lax also covers the embedding into
+; Nextcloud: next.<domain> and immo.<domain> share scheme and registrable domain and
+; are therefore the same site.
+php_admin_value[session.cookie_samesite] = Lax
 ; v0.6.3: the frontend reads its database credentials and keys from this file. The
 ; path is passed, not the values - and the file deliberately holds no IMAP password.
 env[IMMO_WEB_ENV] = $IMMO_WEB_ENV
+; Rev.13: added by hand on 2026-10-07 - "password forgotten" mails need a sender
+; (the system msmtprc is root-only), sessions need a directory inside open_basedir,
+; and Ubuntu's session cleanup (gc_probability 0 + cron) only covers /var/lib/php.
+php_admin_value[sendmail_path] = /usr/bin/msmtp -C /etc/immo/msmtprc -t
+php_admin_value[session.save_path] = $IMMO_DIR/sessions
+php_admin_value[session.gc_probability] = 1
 EOF
+    install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 700 "$IMMO_DIR/sessions" "$IMMO_DIR/sicherung"
+    # Rev.13: the workers run as $IMMO_USER and cannot create a file in /var/log, so the
+    # error log was never written (measured 2026-10-09). Created here, rotated weekly.
+    install -m 640 -o "$IMMO_USER" -g adm /dev/null /var/log/php8.3-fpm-immo.log.new
+    [[ -f /var/log/php8.3-fpm-immo.log ]] && rm -f /var/log/php8.3-fpm-immo.log.new \
+        || mv /var/log/php8.3-fpm-immo.log.new /var/log/php8.3-fpm-immo.log
+    cat > /etc/logrotate.d/php8.3-fpm-immo <<EOF
+/var/log/php8.3-fpm-immo.log {
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+    create 640 $IMMO_USER adm
+}
+EOF
+    # Sender for the frontend (contact address): its own msmtp file, readable by the
+    # pool user only; the password is read at send time from the Python side's .env
+    # (IMAP_PASS = same mailbox), never copied.
+    if [[ -n "$IMMO_MAIL_FROM" && -n "$SMTP_HOST" ]]; then
+        cat > /etc/immo/msmtprc <<EOF
+defaults
+auth on
+tls on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+syslog LOG_MAIL
+account default
+host $SMTP_HOST
+port $SMTP_PORT
+from $IMMO_MAIL_FROM
+user ${IMAP_USER:-$IMMO_MAIL_FROM}
+passwordeval sed -n 's/^IMAP_PASS=//p' $IMMO_DIR/.env
+EOF
+        chown root:"$IMMO_USER" /etc/immo/msmtprc; chmod 640 /etc/immo/msmtprc
+    else
+        warn "IMMO_MAIL_FROM or SMTP_HOST empty - /etc/immo/msmtprc not written, 'password forgotten' cannot send."
+    fi
     systemctl enable --now php8.3-fpm
     systemctl restart php8.3-fpm
 
     # --- Caddy site. X-Frame-Options would forbid the iframe outright; the CSP
     # frame-ancestors rule allows exactly the one origin that may embed the page.
-    dns_gate "$IMMO_DOMAIN"
+    # Rev.13: IMMO_DOMAIN may list several names; the move from silo2 to immo.brill.ing
+    # on 2026-10-07 was only possible by hand before.
+    local immo_dom immo_sites=""
+    for immo_dom in ${IMMO_DOMAIN//,/ }; do
+        dns_gate "$immo_dom"
+        immo_sites="${immo_sites:+$immo_sites, }$immo_dom"
+    done
     cat > "$CADDY_CONFD/20-immo.caddy" <<EOF
-$IMMO_DOMAIN {
+$immo_sites {
+    import protokoll immo
     root * $IMMO_DIR/web
     encode zstd gzip
     header Strict-Transport-Security "max-age=15552000; includeSubDomains"
     header X-Content-Type-Options nosniff
     header -X-Frame-Options
     header Content-Security-Policy "frame-ancestors https://$NC_DOMAIN"
-    @verborgen path /inc/* /.env* /.git/*
+    # Rev.13: every dot file (.env, .git, .user.ini) instead of a growing hand list;
+    # /userscript/ stays reachable - the "install userscript" button links to it.
+    @verborgen path /inc/* /bookmarklets/*
     respond @verborgen 404
+    @punktdatei {
+        path_regexp /\\.
+        not path /.well-known/*
+    }
+    respond @punktdatei 404
     php_fastcgi unix//run/php/immo.sock
     file_server
 }
@@ -2443,7 +2835,7 @@ EOF
 Description=immo.flow daily run
 After=network-online.target mariadb.service
 Wants=network-online.target
-OnFailure=immo-fail-mail.service
+OnFailure=immo-fail-mail@%n.service
 
 [Service]
 Type=oneshot
@@ -2451,6 +2843,9 @@ User=$IMMO_USER
 Group=$IMMO_USER
 WorkingDirectory=$IMMO_DIR
 Environment=PYTHONPATH=$IMMO_DIR
+Environment=TZ=$TIMEZONE
+# Rev.13: without it the database dump went to ~/Documents/_Sicherung (2026-10-07).
+Environment=SICHERUNG_PFAD=$IMMO_DIR/sicherung
 ExecStart=$IMMO_DIR/.venv/bin/python3 $IMMO_DIR/lauf.py
 TimeoutStartSec=3600
 NoNewPrivileges=true
@@ -2474,14 +2869,51 @@ RandomizedDelaySec=300
 [Install]
 WantedBy=timers.target
 EOF
-    # Same pattern as backup-fail-mail: a silent failure is worse than no run.
-    cat > /etc/systemd/system/immo-fail-mail.service <<'EOF'
+    # Rev.13: online check (link status of the listings), added by hand on 2026-10-07.
+    if [[ -n "$IMMO_ONLINE_TIMES" ]]; then
+        cat > /etc/systemd/system/immo-online.service <<EOF
 [Unit]
-Description=Alarm on a failed immo.flow run
+Description=immo.flow online check
+After=network-online.target mariadb.service
+Wants=network-online.target
+OnFailure=immo-fail-mail@%n.service
+
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'MSG="IMMO RUN FAILED on $(hostname) $(date)"; logger -t immo-lauf "$MSG"; journalctl -u immo-lauf.service -n 50 --no-pager | mail -s "$MSG" root 2>/dev/null || true'
+User=$IMMO_USER
+Group=$IMMO_USER
+WorkingDirectory=$IMMO_DIR
+Environment=PYTHONPATH=$IMMO_DIR
+Environment=TZ=$TIMEZONE
+ExecStart=$IMMO_DIR/.venv/bin/python3 $IMMO_DIR/online.py --lauf
+TimeoutStartSec=5400
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=$IMMO_DIR $HDD_MOUNT/immo
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
 EOF
+        {
+            printf '[Unit]\nDescription=immo.flow online check\n\n[Timer]\n'
+            local t; for t in $IMMO_ONLINE_TIMES; do printf 'OnCalendar=*-*-* %s:00\n' "$t"; done
+            printf 'Persistent=true\n\n[Install]\nWantedBy=timers.target\n'
+        } > /etc/systemd/system/immo-online.timer
+        chmod 644 /etc/systemd/system/immo-online.service /etc/systemd/system/immo-online.timer
+    fi
+    # Rev.13: one failure-mail template for every immo unit, with the unit name in the
+    # subject and sent through the alarm account when it exists. The old single
+    # immo-fail-mail.service mailed root and covered immo-lauf only.
+    cat > /etc/systemd/system/immo-fail-mail@.service <<EOF
+[Unit]
+Description=Failure mail for %i to $IMMO_ALARM_TO
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'a=default; grep -q "^account alarm" /etc/msmtprc && a=alarm; { printf "To: $IMMO_ALARM_TO\\nSubject: IMMO FEHLER %i auf %H\\n\\n"; journalctl -u %i -n 50 --no-pager; } | /usr/bin/msmtp -a \$\$a $IMMO_ALARM_TO'
+EOF
+    rm -f /etc/systemd/system/immo-fail-mail.service
     systemctl daemon-reload
     # Rev.10 FIX: only arm the timer once there is something to run. Without the
     # venv the service dies with 203/EXEC at the next firing and sends a failure
@@ -2489,8 +2921,10 @@ EOF
     # server 2026-10-04, where phase 13 ran hours before the code was deployed.
     if [[ -x "$IMMO_DIR/.venv/bin/python3" ]]; then
         systemctl enable --now immo-lauf.timer
+        [[ -z "$IMMO_ONLINE_TIMES" ]] || systemctl enable --now immo-online.timer
     else
         systemctl disable --now immo-lauf.timer 2>/dev/null || true
+        systemctl disable --now immo-online.timer 2>/dev/null || true
         warn "immo-lauf.timer stays OFF - $IMMO_DIR/.venv is missing."
         warn "Deploy the code, then: systemctl enable --now immo-lauf.timer"
     fi
@@ -2500,8 +2934,10 @@ EOF
     cat > /usr/local/lib/backup-pre.d/10-immo-db.sh <<EOF
 #!/bin/bash
 # Dump the immo database into a directory the Borg archive already covers.
+# Rev.13: umask first - before, the dump was created 644 and only then chmod 600.
+umask 077
 set -euo pipefail
-mkdir -p /var/backups/immo
+install -d -m 700 /var/backups/immo
 mariadb-dump --single-transaction --databases '$IMMO_DB' > /var/backups/immo/immo.sql
 chmod 600 /var/backups/immo/immo.sql
 EOF
@@ -2526,22 +2962,36 @@ phase14() {
     for dom in $EXTRA_SITES; do
         dir="/srv/www/$dom"
         dns_gate "$dom"
-        install -d -o www-data -g www-data -m 755 "$dir"
+        # Rev.13: owned by root, not www-data. www-data is the stock PHP account and uid 33
+        # inside the Nextcloud container; no service account should be able to change a
+        # website. Caddy only needs to read.
+        install -d -o root -g root -m 755 "$dir"
         if [[ ! -e "$dir/index.html" ]]; then
             printf '<!doctype html>\n<meta charset="utf-8">\n<title>%s</title>\n<p>%s ist eingerichtet.</p>\n' \
                 "$dom" "$dom" > "$dir/index.html"
-            chown www-data:www-data "$dir/index.html"
             chmod 644 "$dir/index.html"
         fi
+        chown -R root:root "$dir"
         # Static only: a gallery and a portfolio need no PHP, and no interpreter is
         # the cheapest hardening there is. If one of them later needs PHP, it gets
         # its own FPM pool the way phase 13 builds one.
         cat > "$CADDY_CONFD/30-$dom.caddy" <<EOF
 $dom {
+    import protokoll ${dom%%.*}
     root * $dir
     encode zstd gzip
     header Strict-Transport-Security "max-age=15552000; includeSubDomains"
     header X-Content-Type-Options nosniff
+    # Rev.13: headers for static pages (Mozilla Observatory); file_server does not hide
+    # dot files on its own, so .git, .env and the like are answered with 404.
+    header Content-Security-Policy "default-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+    header Referrer-Policy strict-origin-when-cross-origin
+    header Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    @punktdatei {
+        path_regexp /\\.
+        not path /.well-known/*
+    }
+    respond @punktdatei 404
     file_server
 }
 EOF
@@ -2655,7 +3105,7 @@ EOF
 # 127.0.0.1:8081, and Janus on 8188 is covered by the ufw default deny.
 services:
   nats:
-    image: nats:2-alpine
+    image: $NATS_IMAGE
     command: ["-a", "127.0.0.1", "-p", "4222"]
     restart: unless-stopped
     mem_limit: 256m
@@ -2672,7 +3122,7 @@ services:
     security_opt: [ "no-new-privileges:true" ]
 
   signaling:
-    image: strukturag/nextcloud-spreed-signaling:latest
+    image: $SIGNALING_IMAGE
     restart: unless-stopped
     mem_limit: 1g
     pids_limit: 256
@@ -2699,6 +3149,137 @@ EOF
     log "Then in the Nextcloud container:"
     log "  occ talk:signaling:add https://$NC_DOMAIN/standalone-signaling/ <secret from $SECRETS_DIR/signaling-secret>"
     log "  occ talk:turn:add turn $NC_DOMAIN:$TURN_PORT udp,tcp --secret=<from $SECRETS_DIR/turn-secret>"
+}
+
+# ============================ PHASE 16: EURO-OFFICE ==========================
+# Rev.13: Euro-Office (fork of the ONLYOFFICE document server) for editing office
+# files inside Nextcloud. Installed by hand on the production server 2026-10-08 with
+# four failed attempts; this phase reproduces the working end state of 2026-10-09.
+phase16() {
+    require_root
+    if [[ "$ENABLE_OFFICE" != "yes" ]]; then
+        log "Phase 16 skipped (ENABLE_OFFICE=no)."
+        return 0
+    fi
+    [[ -n "$NC_DOMAIN" ]] || die "Phase 16: NC_DOMAIN is empty."
+    [[ -n "$EO_DOMAIN" ]] || die "Phase 16: EO_DOMAIN is empty."
+    docker compose -f /srv/nextcloud/docker-compose.yml ps -q app | grep -q . \
+        || die "Phase 16: Nextcloud stack not running - start it first (phase 9)."
+    log "Phase 16: Euro-Office document server ($EO_IMAGE) on $EO_DOMAIN"
+    dns_gate "$EO_DOMAIN"
+
+    install -d -m 750 "$EO_DIR"
+
+    # JWT shared by the document server and the Nextcloud app. An existing value is
+    # kept: on silo it was set from the owner's keychain, and replacing it would break
+    # the connection until Nextcloud gets the new one. A new value is hex only, because
+    # docker compose interprets '$' and '#' in an unquoted .env value.
+    local jwt=""
+    if [[ -f "$EO_DIR/.env" ]]; then
+        jwt="$(sed -n 's/^JWT_SECRET=//p' "$EO_DIR/.env" | head -n 1 | sed "s/^'//; s/'\$//")"
+    fi
+    [[ -n "$jwt" ]] || jwt="$(gen_fixed eurooffice-jwt 64)"
+    [[ "$jwt" != *"'"* ]] || die "Phase 16: JWT in $EO_DIR/.env contains a single quote - docker compose cannot read it literally."
+    ( umask 077; printf "JWT_SECRET='%s'\n" "$jwt" > "$EO_DIR/.env" )
+    chmod 600 "$EO_DIR/.env"
+
+    # The services in the container run as user 'ds', not root. Root-owned bind
+    # mounts made every conversion fail with "Conversion error" (-3): EACCES on
+    # Data/runtime.json and on the converter output in App_Data/cache. Found on the
+    # production server 2026-10-09. uid/gid are read from the image, not assumed.
+    local ds_uid ds_gid
+    docker pull -q "$EO_IMAGE" >/dev/null || die "Phase 16: pulling $EO_IMAGE failed - check the tag."
+    ds_uid="$(docker run --rm --entrypoint id "$EO_IMAGE" -u ds)" || die "Phase 16: user ds not found in $EO_IMAGE."
+    ds_gid="$(docker run --rm --entrypoint id "$EO_IMAGE" -g ds)" || die "Phase 16: group of ds not found in $EO_IMAGE."
+    install -d -o "$ds_uid" -g "$ds_gid" -m 750 "$EO_DIR/data" "$EO_DIR/private"
+    chown -R "$ds_uid:$ds_gid" "$EO_DIR/data" "$EO_DIR/private"
+
+    # No bind mount for the log directory: it hides the image's 'adminpanel'
+    # subdirectory and the container restarted in a loop (2026-10-08).
+    cat > "$EO_DIR/docker-compose.yml" <<EOF
+# Managed by install.sh phase 16 - do not edit by hand.
+services:
+  documentserver:
+    image: $EO_IMAGE
+    restart: unless-stopped
+    mem_limit: $EO_MEM_LIMIT
+    ports:
+      - "127.0.0.1:$EO_PORT:80"
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: \${JWT_SECRET}
+      EXAMPLE_ENABLED: "false"
+    volumes:
+      - ./data:/var/lib/euro-office/documentserver
+      - ./private:/var/www/euro-office/Data
+EOF
+    chmod 640 "$EO_DIR/docker-compose.yml"
+    (cd "$EO_DIR" && docker compose up -d) || die "Phase 16: docker compose up failed."
+    local i
+    for i in $(seq 1 60); do
+        [[ "$(curl -s "http://127.0.0.1:$EO_PORT/healthcheck")" == true ]] && break
+        sleep 3
+    done
+    [[ "$(curl -s "http://127.0.0.1:$EO_PORT/healthcheck")" == true ]] || die "Phase 16: healthcheck not true after 3 minutes - see: cd $EO_DIR && docker compose logs"
+
+    cat > "$CADDY_CONFD/40-office.caddy" <<EOF
+$EO_DOMAIN {
+    import protokoll office
+    reverse_proxy 127.0.0.1:$EO_PORT
+}
+EOF
+    chmod 644 "$CADDY_CONFD/40-office.caddy"   # root umask 027 made a hand-made copy unreadable for caddy
+    caddy_apply
+
+    # Nextcloud side. The admin page is "Administration settings" -> Euro-Office.
+    local occ="docker compose -f /srv/nextcloud/docker-compose.yml exec -T -u www-data app php occ"
+    $occ app:install eurooffice >/dev/null 2>&1 || $occ app:enable eurooffice || die "Phase 16: Nextcloud app eurooffice not available."
+    $occ config:app:set eurooffice DocumentServerUrl --value="https://$EO_DOMAIN/" >/dev/null
+    $occ config:app:set eurooffice jwt_secret --value="$jwt" >/dev/null
+    unset jwt
+    if $occ eurooffice:documentserver --check 2>&1 | grep -q 'successfully connected'; then
+        log "Phase 16 done: Euro-Office connected to Nextcloud."
+    else
+        warn "Phase 16: 'occ eurooffice:documentserver --check' does not report success. Logs:"
+        warn "    docker exec eurooffice-documentserver-1 tail -n 40 /var/log/euro-office/documentserver/converter/out.log"
+    fi
+}
+
+# ============================ PHASE 17: CLAMAV ===============================
+# Rev.13 (owner's decision 2026-10-09): uploads to Nextcloud are scanned before the
+# building project's 22 participants start exchanging files. clamd needs ~1.2 GB RAM for
+# the signatures and briefly ~2.4 GB on the daily reload (docs.clamav.net, FAQ).
+phase17() {
+    require_root
+    if [[ "$ENABLE_CLAMAV" != "yes" ]]; then
+        log "Phase 17 skipped (ENABLE_CLAMAV=no)."
+        return 0
+    fi
+    log "Phase 17: ClamAV daemon + Nextcloud app files_antivirus"
+    apt-get install -y -q clamav clamav-daemon clamav-freshclam
+    systemctl enable --now clamav-freshclam
+    # clamd refuses to start without signatures; the first download takes a moment.
+    local i
+    for i in $(seq 1 60); do
+        ls /var/lib/clamav/*.c[lv]d >/dev/null 2>&1 && break
+        sleep 5
+    done
+    systemctl enable --now clamav-daemon
+    for i in $(seq 1 60); do [[ -S /var/run/clamav/clamd.ctl ]] && break; sleep 5; done
+    [[ -S /var/run/clamav/clamd.ctl ]] || die "Phase 17: clamd socket did not appear - see journalctl -u clamav-daemon."
+    # The containers must see the socket: phase 9 mounts it when ENABLE_CLAMAV=yes.
+    if ! grep -q '/var/run/clamav' /srv/nextcloud/docker-compose.yml; then
+        die "Phase 17: the Nextcloud compose file has no clamd mount - run phase9 again with ENABLE_CLAMAV=yes, then 'docker compose up -d' in /srv/nextcloud."
+    fi
+    (cd /srv/nextcloud && docker compose up -d) >/dev/null
+    local occ="docker compose -f /srv/nextcloud/docker-compose.yml exec -T -u www-data app php occ"
+    $occ app:install files_antivirus >/dev/null 2>&1 || $occ app:enable files_antivirus || die "Phase 17: app files_antivirus not available."
+    $occ config:app:set files_antivirus av_mode --value=socket >/dev/null
+    $occ config:app:set files_antivirus av_socket --value=/var/run/clamav/clamd.ctl >/dev/null
+    $occ config:app:set files_antivirus av_stream_max_length --value=26214400 >/dev/null
+    $occ config:app:set files_antivirus av_infected_action --value="$AV_INFECTED_ACTION" >/dev/null
+    $occ files_antivirus:status 2>&1 | tail -n 3 || true
+    log "Phase 17 done. Test: upload the EICAR test string as a file - it must be reported."
 }
 
 # ============================ VERIFY / HEALTH-CHECK ==========================
@@ -2770,6 +3351,12 @@ verify() {
     chk "Caddy-Sandbox-Drop-in"            "test -f /etc/systemd/system/caddy.service.d/hardening.conf"
     chk "ubuntu user removed"              "! id ubuntu"
     chk "AIDE DB present"                  "test -s /var/lib/aide/aide.db"
+    chk "AIDE check from 05:00"            "systemctl cat dailyaidecheck.timer | grep -q '^OnCalendar=\\*-\\*-\\* 05:45'"
+    chk "Lynis custom.prf present"         "grep -q '^skip-test=' /etc/lynis/custom.prf"
+    chk "cloud-init disabled"              "test -f /etc/cloud/cloud-init.disabled || test ! -d /etc/cloud"
+    chk "Caddy may write /var/log/caddy"   "systemctl show caddy -p ReadWritePaths | grep -q /var/log/caddy"
+    chk "Caddy access log active"          "test -s /var/log/caddy/next.log"
+    chk "NC preview timer active"          "systemctl is-active -q nc-preview.timer"
     chk "GRUB without apparmor boot param" "! grep -rq 'apparmor=1' /etc/default/grub.d/ 2>/dev/null"
     # Rev.8 - the six findings from the CIS audit on the test server, 2026-10-03:
     chk "sshd Banner active"               "sshd -T 2>/dev/null | grep -qi '^banner /etc/issue.net'"
@@ -2795,7 +3382,7 @@ verify() {
         chk "immo: database exists"        "mariadb -N -e \"SHOW DATABASES\" | grep -qx \"$IMMO_DB\""
         chk "immo: Caddy site file"        "test -f /etc/caddy/conf.d/20-immo.caddy"
         chk "immo: frame-ancestors set"    "grep -q 'frame-ancestors' /etc/caddy/conf.d/20-immo.caddy"
-        chk "immo: SameSite=None in pool"  "grep -q 'session.cookie_samesite. = None' /etc/php/8.3/fpm/pool.d/immo.conf"
+        chk "immo: SameSite=Lax in pool"   "grep -q 'session.cookie_samesite. = Lax' /etc/php/8.3/fpm/pool.d/immo.conf"
         chk "immo: env[IMMO_WEB_ENV] set"   "grep -q '^env\\[IMMO_WEB_ENV\\]' /etc/php/8.3/fpm/pool.d/immo.conf"
         chk "immo: .env 600 and immo-owned" "[[ \"\$(stat -c '%a %U' \"$IMMO_DIR/.env\")\" == \"600 $IMMO_USER\" ]]"
         chk "immo: web.env 640 root:$IMMO_USER" "[[ \"\$(stat -c '%a %U:%G' \"$IMMO_WEB_ENV\")\" == \"640 root:$IMMO_USER\" ]]"
@@ -2803,6 +3390,11 @@ verify() {
         chk "immo: IMAP port 993 not 995"   "! grep -q '^IMAP_PORT=995' \"$IMMO_DIR/.env\""
         chk "immo: timer active (or off, no venv)" "[[ ! -x \"$IMMO_DIR/.venv/bin/python3\" ]] || systemctl is-active immo-lauf.timer"
         chk "immo: Borg pre-hook"          "test -x /usr/local/lib/backup-pre.d/10-immo-db.sh"
+        chk "immo: web.env in open_basedir" "grep -q 'open_basedir.*$IMMO_WEB_ENV' /etc/php/8.3/fpm/pool.d/immo.conf"
+        chk "immo: sessions dir 700"        "[[ \"\$(stat -c %a $IMMO_DIR/sessions)\" == 700 ]]"
+        chk "immo: sendmail via /etc/immo/msmtprc" "grep -q 'sendmail_path.*/etc/immo/msmtprc' /etc/php/8.3/fpm/pool.d/immo.conf"
+        chk "immo: PHP error log writable"  "[[ \"\$(stat -c %U /var/log/php8.3-fpm-immo.log 2>/dev/null)\" == $IMMO_USER ]]"
+        chk "immo: failure mails via template" "grep -q 'immo-fail-mail@' /etc/systemd/system/immo-lauf.service && test ! -e /etc/systemd/system/immo-fail-mail.service"
         chk "immo: reports on data volume" "test -d \"$HDD_MOUNT/immo/Kaufpreise\""
     fi
     if [[ "$ENABLE_TALK_HPB" == "yes" ]]; then
@@ -2810,6 +3402,15 @@ verify() {
         chk "HPB: TURN port open in ufw"   "ufw status | grep -q \"$TURN_PORT\""
         chk "HPB: turnserver.conf 640"     "[[ \"\$(stat -c %a /etc/turnserver.conf)\" == 640 ]]"
         chk "HPB: signaling handle in NC"  "grep -q 'standalone-signaling' /etc/caddy/conf.d/10-nextcloud.caddy"
+    fi
+    if [[ "$ENABLE_OFFICE" == "yes" ]]; then
+        chk "Office: container running"    "docker ps --format '{{.Image}}' | grep -qxF \"$EO_IMAGE\""
+        chk "Office: healthcheck local"    "[[ \"\$(curl -s http://127.0.0.1:$EO_PORT/healthcheck)\" == true ]]"
+        chk "Office: healthcheck via Caddy" "[[ \"\$(curl -s https://$EO_DOMAIN/healthcheck)\" == true ]]"
+        chk "Office: site file 644"        "[[ \"\$(stat -c %a /etc/caddy/conf.d/40-office.caddy)\" == 644 ]]"
+        chk "Office: .env 600"             "[[ \"\$(stat -c %a $EO_DIR/.env)\" == 600 ]]"
+        chk "Office: data/private not root" "[[ \"\$(stat -c %u $EO_DIR/data)\" != 0 && \"\$(stat -c %u $EO_DIR/private)\" != 0 ]]"
+        chk "Office: NC connected (--check)" "docker compose -f /srv/nextcloud/docker-compose.yml exec -T -u www-data app php occ eurooffice:documentserver --check | grep -q 'successfully connected'"
     fi
     if [[ "$SWAPFILE_SIZE_GB" =~ ^[1-9][0-9]*$ ]]; then
         chk "swap file in fstab, mode 600" "grep -qE '^/swapfile[[:space:]]' /etc/fstab && [[ \"\$(stat -c %a /swapfile)\" == 600 ]]"
@@ -2821,6 +3422,31 @@ verify() {
     chk "Borg: data volume included"       "grep -q \"exclude '$BACKUP_DIR'\" /usr/local/bin/backup-server.sh"
     chk "SMTP_PASS cleared in install.conf" "! grep -qE \"^SMTP_PASS=['\\\"]?[^'\\\"[:space:]]\" \"$INSTALL_CONF\" 2>/dev/null"
     chk "rsync present, daemon masked"     "command -v rsync >/dev/null && [[ \"\$(systemctl is-enabled rsync 2>/dev/null)\" != enabled ]]"
+    # --- Rev.13: checks for the findings of the audit of 2026-10-09 (Pruefung-2026-10-09).
+    # Function, not only configuration: each one would have caught a real fault.
+    chk "ssh.socket masked"                "[[ \"\$(systemctl is-enabled ssh.socket 2>/dev/null)\" == masked ]]"
+    chk "sshd: no ECDSA host key offered"  "! sshd -T | grep -qi '^hostkey .*ecdsa'"
+    chk "sshd: PQ key exchange first"      "sshd -T | grep -q '^kexalgorithms sntrup761x25519'"
+    chk "Borg: archive younger than 2 days" "BORG_PASSCOMMAND='cat /root/.borg-passphrase' borg list --json --last 1 $BACKUP_DIR/repo-server 2>/dev/null | python3 -c 'import sys,json,datetime as d; a=json.load(sys.stdin)[\"archives\"][-1][\"time\"]; sys.exit(0 if (d.datetime.now()-d.datetime.fromisoformat(a)).total_seconds() < 172800 else 1)'"
+    chk "Borg: compact after prune"        "grep -q 'borg compact' /usr/local/bin/backup-server.sh"
+    chk "Borg: daily timer"                "systemctl cat borg-backup.timer | grep -q 'OnCalendar=.*[0-9]:[0-9]'"
+    chk "DB dumps not world-readable"      "! find /var/backups/nc /var/backups/immo -type f -perm /044 2>/dev/null | grep -q ."
+    chk "unattended-upgrades: Caddy origin matches" "grep -q \"origin=\$(sed -n 's/^Origin: //p' /var/lib/apt/lists/*caddy*Release 2>/dev/null | head -n1)\\\"\" /etc/apt/apt.conf.d/52unattended-upgrades-local"
+    chk "admin password reminder timer"    "systemctl is-active admin-pw-reminder.timer"
+    chk "fail2ban: no start/stop mails"    "test -f /etc/fail2ban/action.d/sendmail-common.local"
+    if [[ -n "$SMTP_ALARM_FROM" ]]; then
+        chk "msmtp account alarm"          "grep -q '^account alarm' /etc/msmtprc"
+    fi
+    if [[ "$KEEP_SNAPD" == "yes" ]]; then
+        chk "Livepatch running"            "canonical-livepatch status 2>/dev/null | grep -q 'running: true'"
+    fi
+    if [[ "$ENABLE_EXTRA_SITES" == "yes" ]]; then
+        chk "websites owned by root"       "! find /srv/www -mindepth 1 ! -user root | grep -q ."
+    fi
+    if [[ "$ENABLE_CLAMAV" == "yes" ]]; then
+        chk "ClamAV daemon socket"         "test -S /var/run/clamav/clamd.ctl"
+        chk "NC files_antivirus enabled"   "docker exec -u www-data nextcloud-app-1 php occ app:list --enabled | grep -q files_antivirus"
+    fi
 
     echo "=== $ok OK, $fail open ==="
     echo "Final audit:  lynis audit system   (Lynis from the CISOfy repo, phase 4)"
@@ -2879,9 +3505,10 @@ usage() {
     echo "Phases: preflight phase1 ... phase12   verify"
     echo "Optional phases (each behind its own switch, all default off):"
     echo "  phase13  immo.flow (ENABLE_IMMO)        phase14  further static sites (ENABLE_EXTRA_SITES)"
-    echo "  phase15  Talk HPB  (ENABLE_TALK_HPB)"
+    echo "  phase15  Talk HPB  (ENABLE_TALK_HPB)        phase16  Euro-Office (ENABLE_OFFICE)"
+    echo "  phase17  ClamAV for Nextcloud uploads (ENABLE_CLAMAV)"
     echo "Maintenance: caddy-base  (rebuild Caddyfile + Nextcloud site after an upgrade to Rev.10)"
-    echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-15 + verify + lynis)  all (everything with the stop)"
+    echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-11, 13-17, upgrade, 12 + verify + lynis)  all (everything with the stop)"
     echo "Audit: lynis (writes \$TESTS_DIR/30-lynis.log)"
 }
 
@@ -2893,7 +3520,7 @@ main() {
         phase4) phase4 ;; phase5) phase5 ;; phase6) phase6 ;;
         phase7) phase7 ;; phase8) phase8 ;;
         phase9) phase9 ;; phase10) phase10 ;; phase11) phase11 ;; phase12) phase12 ;;
-        phase13) phase13 ;; phase14) phase14 ;; phase15) phase15 ;;
+        phase13) phase13 ;; phase14) phase14 ;; phase15) phase15 ;; phase16) phase16 ;; phase17) phase17 ;;
         caddy-base)
             # Rev.10: rebuild only the Caddy structure (main file + Nextcloud site).
             # Needed on a server installed before Rev.10, whose Caddyfile is still
@@ -2918,8 +3545,13 @@ main() {
             # Continuation after a passed login test (bootstrap). Assumes the
             # prerequisites (DNS, HDD, WG pubkey, NC tag, SMTP) are set up front.
             [[ -n "$(ss -Htln "sport = :${SSH_PORT}" 2>/dev/null)" ]] || die "sshd not listening on $SSH_PORT - run 'bootstrap' + login test first."
-            phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11; phase12
-            phase13; phase14; phase15
+            # Rev.13: phase12 (cleanup + AIDE baseline) runs LAST, after all services and a
+            # final upgrade - its own comment always demanded that; before, the baseline
+            # knew nothing of MariaDB, PHP-FPM, coturn or the immo units.
+            phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11
+            phase13; phase14; phase15; phase16; phase17
+            apt-get update -q && apt-get full-upgrade -y -q
+            phase12
             verify || true
             lynis_audit || true
             warn "Plan a reboot (boot params/fstab only take effect then): shutdown -r +1"
@@ -2935,8 +3567,10 @@ main() {
             [[ "$ans" == "yes" ]] || die "Aborted - test the SSH login first, then run './install.sh all' again (phases are idempotent)."
             # Council-Fix 4 used to ask about the offline copy HERE, after phase2 - too
             # late to prevent a lock-out. password_gate above does it before phase2.
-            phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11; phase12
-            phase13; phase14; phase15
+            phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11
+            phase13; phase14; phase15; phase16; phase17
+            apt-get update -q && apt-get full-upgrade -y -q
+            phase12          # Rev.13: last, see 'rest'
             verify || true   # one open point must not swallow the final notes (Review M7)
             lynis_audit || true
             warn "Plan a reboot (boot params, fstab, possibly the kernel): shutdown -r +1"
