@@ -360,6 +360,9 @@ IMMO_DB_USER="${IMMO_DB_USER:-immo-user}"
 IMMO_RUN_TIME="${IMMO_RUN_TIME:-15:00}"    # systemd OnCalendar time, server timezone
 # Rev.13: the online check (online.py) was added by hand on silo on 2026-10-07; empty = off.
 IMMO_ONLINE_TIMES="${IMMO_ONLINE_TIMES:-07:00 19:00}"
+# Rev.13 (2026-10-11): mail import (angebote.py --imap) every four hours from 05:30 -
+# the daily run alone left offers waiting up to a day; empty = off. Nothing before 05:00.
+IMMO_MAIL_TIMES="${IMMO_MAIL_TIMES:-05:30 09:30 13:30 17:30 21:30}"
 IMMO_ALARM_TO="${IMMO_ALARM_TO:-${SMTP_ALARM_FROM:-$ADMIN_MAIL}}"   # recipient of failure mails
 # Playwright/Chromium system libraries: ~400 MB on disk, ~1 GB RAM while running.
 # Only needed if the scrapers run ON THE SERVER instead of on the local machine.
@@ -3197,6 +3200,20 @@ EOF
         } > /etc/systemd/system/immo-online.timer
         chmod 644 /etc/systemd/system/immo-online.service /etc/systemd/system/immo-online.timer
     fi
+    # Rev.13 (2026-10-11): mail import between the daily runs, same sandbox as the online check.
+    if [[ -n "$IMMO_MAIL_TIMES" ]]; then
+        sed -e 's/^Description=.*/Description=immo.flow mail import/' \
+            -e "s|^ExecStart=.*|ExecStart=$IMMO_DIR/.venv/bin/python3 $IMMO_DIR/angebote.py --imap|" \
+            -e 's/^TimeoutStartSec=.*/TimeoutStartSec=1800/' \
+            /etc/systemd/system/immo-online.service > /etc/systemd/system/immo-mail.service 2>/dev/null \
+            || warn "immo-mail.service needs immo-online.service (IMMO_ONLINE_TIMES) as template."
+        {
+            printf '[Unit]\nDescription=immo.flow mail import\n\n[Timer]\n'
+            local t; for t in $IMMO_MAIL_TIMES; do printf 'OnCalendar=*-*-* %s:00\n' "$t"; done
+            printf 'Persistent=true\n\n[Install]\nWantedBy=timers.target\n'
+        } > /etc/systemd/system/immo-mail.timer
+        chmod 644 /etc/systemd/system/immo-mail.service /etc/systemd/system/immo-mail.timer 2>/dev/null || true
+    fi
     # Rev.13: one failure-mail template for every immo unit, with the unit name in the
     # subject and sent through the alarm account when it exists. The old single
     # immo-fail-mail.service mailed root and covered immo-lauf only.
@@ -3216,9 +3233,11 @@ EOF
     if [[ -x "$IMMO_DIR/.venv/bin/python3" ]]; then
         systemctl enable --now immo-lauf.timer
         [[ -z "$IMMO_ONLINE_TIMES" ]] || systemctl enable --now immo-online.timer
+        [[ -z "$IMMO_MAIL_TIMES" || ! -s /etc/systemd/system/immo-mail.service ]] || systemctl enable --now immo-mail.timer
     else
         systemctl disable --now immo-lauf.timer 2>/dev/null || true
         systemctl disable --now immo-online.timer 2>/dev/null || true
+        systemctl disable --now immo-mail.timer 2>/dev/null || true
         warn "immo-lauf.timer stays OFF - $IMMO_DIR/.venv is missing."
         warn "Deploy the code, then: systemctl enable --now immo-lauf.timer"
     fi
@@ -3826,6 +3845,7 @@ verify() {
         chk "immo: sendmail via msmtprc-web" "grep -q 'sendmail_path.*/etc/immo/msmtprc-web' $P"
         chk "immo: PHP error log writable"  "[[ \"\$(stat -c %U /var/log/php8.3-fpm-immo-web.log 2>/dev/null)\" == $IMMO_WEB_USER ]]"
         chk "immo: deploy/run sudo rule"    "visudo -cf /etc/sudoers.d/immo >/dev/null && test -x /usr/local/sbin/immo-deploy && test -x /usr/local/sbin/immo-run"
+        [[ -z "$IMMO_MAIL_TIMES" ]] || chk "immo: mail import timer active" "systemctl is-active -q immo-mail.timer && grep -q 'angebote.py --imap' /etc/systemd/system/immo-mail.service"
         chk "immo: failure mails via template" "grep -q 'immo-fail-mail@' /etc/systemd/system/immo-lauf.service && test ! -e /etc/systemd/system/immo-fail-mail.service"
         chk "immo: reports on data volume" "test -d \"$HDD_MOUNT/immo/Kaufpreise\""
     fi
