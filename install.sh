@@ -372,8 +372,16 @@ IMAP_PORT="${IMAP_PORT:-993}"              # 993 = IMAP over TLS. NOT 995 - that
 IMAP_USER="${IMAP_USER:-}"                 # the mailbox the run reads
 IMAP_PASS="${IMAP_PASS:-}"                 # ONE-TIME write to $IMMO_DIR/.env (600), then cleared here
 IMAP_ORDNER="${IMAP_ORDNER:-INBOX}"
-IMMO_WEB_ENV="${IMMO_WEB_ENV:-/etc/immo/web.env}"   # env file for the PHP frontend, WITHOUT the IMAP password
-IMMO_MAIL_FROM="${IMMO_MAIL_FROM:-}"       # sender of the "password forgotten" mails
+# Rev.13 (immo_change 2.1, done 2026-10-11): the frontend runs as its own system user
+# from its own directory with its own database account (rows only, no DDL) and its own
+# sender mailbox - a hole in the PHP code no longer reaches .env, the dumps, the IMAP
+# mailbox or the processing's database rights.
+IMMO_WEB_USER="${IMMO_WEB_USER:-immo-web}"
+IMMO_WEB_DIR="${IMMO_WEB_DIR:-/srv/immo-web}"
+IMMO_WEB_DB_USER="${IMMO_WEB_DB_USER:-immo_web}"
+IMMO_WEB_ENV="${IMMO_WEB_ENV:-/etc/immo/immo-web.env}"   # env file for the PHP frontend, WITHOUT the IMAP password
+IMMO_MAIL_FROM="${IMMO_MAIL_FROM:-}"       # sender of the "password forgotten" mails, e.g. noreply@example.com;
+                                           # password in $SECRETS_IN_DIR/smtp-immo-web
 
 # --- Rev.10: phase 14, further static sites ---
 ENABLE_EXTRA_SITES="${ENABLE_EXTRA_SITES:-no}"
@@ -386,12 +394,13 @@ ENABLE_TALK_HPB="${ENABLE_TALK_HPB:-no}"
 TURN_PORT="${TURN_PORT:-3478}"
 JANUS_RTP_MIN="${JANUS_RTP_MIN:-20000}"
 JANUS_RTP_MAX="${JANUS_RTP_MAX:-20100}"
-# Janus has no image published by the Nextcloud project. UNVERIFIED default -
-# check it against the upstream repository before the first run.
-JANUS_IMAGE="${JANUS_IMAGE:-canyan/janus-gateway:latest}"
-# Rev.13: measured on Docker Hub 2026-10-09 - canyan/janus-gateway:latest was last pushed
-# 2023-05-20, 'master' 2024-05-06: the image is unmaintained. Replace it before the next
-# phase-15 run (open decision). The signaling server is pinned to its release line.
+# Rev.13: canyan/janus-gateway:latest (last pushed 2023-05-20, 195 HIGH/CRITICAL by Trivy
+# 2026-10-11) is replaced by an image built on this server from Alpine's maintained
+# janus-gateway package (same approach as nextcloud/aio-talk), rebuilt weekly by
+# janus-rebuild.timer. JANUS_ALPINE is the base; the tag below is the local image.
+JANUS_ALPINE="${JANUS_ALPINE:-alpine:3.24}"
+JANUS_IMAGE="${JANUS_IMAGE:-silo-janus:aktuell}"
+# The signaling server is pinned to its release line (2.1.1 = newest release 2026-10-11).
 SIGNALING_IMAGE="${SIGNALING_IMAGE:-strukturag/nextcloud-spreed-signaling:2.1.1}"
 NATS_IMAGE="${NATS_IMAGE:-nats:2-alpine}"
 
@@ -2248,7 +2257,7 @@ $OCC config:system:set trashbin_retention_obligation --value="14, 14"
 if [[ -d /etc/immo ]]; then
     if pub="$($OCC config:app:get external jwt_token_pubkey_es256 2>/dev/null)" && [[ -n "$pub" ]]; then
         printf '%s\n' "$pub" > /etc/immo/nextcloud-jwt.pub
-        chown root:immo /etc/immo/nextcloud-jwt.pub; chmod 640 /etc/immo/nextcloud-jwt.pub
+        chown root:immo-web /etc/immo/nextcloud-jwt.pub; chmod 640 /etc/immo/nextcloud-jwt.pub
         echo "immo.flow: /etc/immo/nextcloud-jwt.pub written."
     else
         echo "immo.flow: no JWT key yet - log in to Nextcloud once, then run this script again."
@@ -2640,7 +2649,7 @@ phase12() {
     # Rev.13: directories that change every day by design - without them the daily AIDE
     # report is noise and a real change drowns in it.
     printf '!/var/lib/mysql\n!/var/backups\n!/var/lib/php/sessions\n!%s\n!%s\n!%s\n!%s\n!%s\n!%s\n!/srv/eurooffice/data\n!/srv/eurooffice/private\n' \
-        "$IMMO_DIR/.venv" "$IMMO_DIR/.cache" "$IMMO_DIR/sessions" "$IMMO_DIR/sicherung" "$IMMO_DIR/daten" "$IMMO_DIR/protokolle" \
+        "$IMMO_DIR/.venv" "$IMMO_DIR/.cache" "/var/lib/immo-web/sessions" "$IMMO_DIR/sicherung" "$IMMO_DIR/daten" "$IMMO_DIR/protokolle" \
         >> /etc/aide/aide.conf.d/99_local_excludes
     cat > /etc/aide/aide.conf.d/99_local_audittools <<'EOF'
 /usr/sbin/auditctl   p+i+n+u+g+s+b+acl+xattrs+sha512
@@ -2714,7 +2723,12 @@ phase13() {
 
     id -u "$IMMO_USER" &>/dev/null || useradd --system --create-home --home-dir "$IMMO_DIR" \
         --shell /usr/sbin/nologin --comment "immo.flow service account" "$IMMO_USER"
-    install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 750 "$IMMO_DIR" "$IMMO_DIR/web" "$IMMO_DIR/daten"
+    install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 750 "$IMMO_DIR" "$IMMO_DIR/daten"
+    id -u "$IMMO_WEB_USER" &>/dev/null || useradd --system --user-group --no-create-home \
+        --home-dir "$IMMO_WEB_DIR" --shell /usr/sbin/nologin --comment "immo.flow frontend" "$IMMO_WEB_USER"
+    # Code is root-owned and only group-readable: the frontend can read but never change it.
+    install -d -o root -g "$IMMO_WEB_USER" -m 750 "$IMMO_WEB_DIR" /var/lib/immo-web
+    install -d -o "$IMMO_WEB_USER" -g "$IMMO_WEB_USER" -m 700 /var/lib/immo-web/sessions
     # Market reports grow past 100 MB and keep growing; they belong on the data
     # volume, not on the 500 GB system NVMe.
     install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 750 "$HDD_MOUNT/immo" "$HDD_MOUNT/immo/Kaufpreise"
@@ -2722,9 +2736,13 @@ phase13() {
     chown -R "$IMMO_USER:$IMMO_USER" "$HDD_MOUNT/immo"
     # Rev.12: Caddy serves the static files and resolves try_files itself - without group
     # read on the 750 web root every CSS/JS file and every pretty URL answered 403.
-    if id caddy &>/dev/null && ! id -nG caddy | grep -qw "$IMMO_USER"; then
-        usermod -aG "$IMMO_USER" caddy
-        systemctl restart caddy
+    # Rev.13: that group is now $IMMO_WEB_USER; membership in $IMMO_USER gave Caddy read
+    # access to everything group-readable under $IMMO_DIR (logs, code) and is removed.
+    if id caddy &>/dev/null; then
+        local caddy_neu=0
+        id -nG caddy | tr " " "\n" | grep -qx "$IMMO_WEB_USER" || { usermod -aG "$IMMO_WEB_USER" caddy; caddy_neu=1; }
+        id -nG caddy | tr " " "\n" | grep -qx "$IMMO_USER" && { gpasswd -d caddy "$IMMO_USER" >/dev/null; caddy_neu=1; }
+        (( caddy_neu )) && systemctl restart caddy
     fi
     [[ -e "$IMMO_DIR/Kaufpreise" ]] || ln -s "$HDD_MOUNT/immo/Kaufpreise" "$IMMO_DIR/Kaufpreise"
 
@@ -2740,8 +2758,9 @@ EOF
     systemctl enable --now mariadb
     systemctl restart mariadb
 
-    local immo_db_pass sqlf
+    local immo_db_pass web_db_pass sqlf
     immo_db_pass="$(gen_secret immo-db-pass 32)"
+    web_db_pass="$(gen_secret immo-web-db-pass 32)"
     sqlf="$SECRETS_DIR/.immo-grant.sql"
     install -d -m 700 "$SECRETS_DIR"
     install -m 600 /dev/null "$sqlf"      # password must never reach the process list
@@ -2750,6 +2769,9 @@ CREATE DATABASE IF NOT EXISTS \`$IMMO_DB\` CHARACTER SET utf8mb4 COLLATE utf8mb4
 CREATE USER IF NOT EXISTS '$IMMO_DB_USER'@'127.0.0.1' IDENTIFIED BY '$immo_db_pass';
 ALTER USER '$IMMO_DB_USER'@'127.0.0.1' IDENTIFIED BY '$immo_db_pass';
 GRANT ALL PRIVILEGES ON \`$IMMO_DB\`.* TO '$IMMO_DB_USER'@'127.0.0.1';
+CREATE USER IF NOT EXISTS '$IMMO_WEB_DB_USER'@'127.0.0.1' IDENTIFIED BY '$web_db_pass';
+ALTER USER '$IMMO_WEB_DB_USER'@'127.0.0.1' IDENTIFIED BY '$web_db_pass';
+GRANT SELECT, INSERT, UPDATE, DELETE ON \`$IMMO_DB\`.* TO '$IMMO_WEB_DB_USER'@'127.0.0.1';
 FLUSH PRIVILEGES;
 EOF
     mariadb < "$sqlf" || die "Phase 13: MariaDB setup failed."
@@ -2795,31 +2817,35 @@ EOF
     fi
     chown "$IMMO_USER:$IMMO_USER" "$IMMO_DIR/.env"; chmod 600 "$IMMO_DIR/.env"
 
-    install -d -m 750 -o root -g "$IMMO_USER" /etc/immo
-    install -m 640 -o root -g "$IMMO_USER" /dev/null "$IMMO_WEB_ENV.new"
+    # /etc/immo holds one file per reader, each with its own group; the directory itself
+    # carries no secret and is world-traversable.
+    install -d -m 755 -o root -g root /etc/immo
+    install -m 640 -o root -g "$IMMO_WEB_USER" /dev/null "$IMMO_WEB_ENV.new"
     if [[ -f "$IMMO_WEB_ENV" ]]; then cat "$IMMO_WEB_ENV" > "$IMMO_WEB_ENV.new"; fi
     mv "$IMMO_WEB_ENV.new" "$IMMO_WEB_ENV"
     env_set "$IMMO_WEB_ENV" DB_HOST 127.0.0.1
     env_set "$IMMO_WEB_ENV" DB_PORT 3306
     env_set "$IMMO_WEB_ENV" DB_NAME "$IMMO_DB"
-    env_set "$IMMO_WEB_ENV" DB_USER "$IMMO_DB_USER"
-    env_set "$IMMO_WEB_ENV" DB_PASS "$immo_db_pass"
+    env_set "$IMMO_WEB_ENV" DB_USER "$IMMO_WEB_DB_USER"
+    env_set "$IMMO_WEB_ENV" DB_PASS "$web_db_pass"
     env_set "$IMMO_WEB_ENV" ERFASS_SCHLUESSEL "$(gen_secret immo-erfass-schluessel 32)"
     env_set "$IMMO_WEB_ENV" MAIL_ABSENDER "${IMMO_MAIL_FROM:-${SMTP_FROM:-root@$(hostname)}}"
-    chown root:"$IMMO_USER" "$IMMO_WEB_ENV"; chmod 640 "$IMMO_WEB_ENV"
+    chown root:"$IMMO_WEB_USER" "$IMMO_WEB_ENV"; chmod 640 "$IMMO_WEB_ENV"
     if grep -q '^IMAP_' "$IMMO_WEB_ENV"; then die "$IMMO_WEB_ENV holds IMAP values - the web side must never see them."; fi
-    log "Env files written: $IMMO_DIR/.env (600 $IMMO_USER) and $IMMO_WEB_ENV (640 root:$IMMO_USER)."
+    log "Env files written: $IMMO_DIR/.env (600 $IMMO_USER) and $IMMO_WEB_ENV (640 root:$IMMO_WEB_USER)."
 
     # --- PHP-FPM pool. Own pool, own user, own socket; the stock www pool is
     # switched off because nothing uses it and every listening pool is surface.
     if [[ -f /etc/php/8.3/fpm/pool.d/www.conf ]]; then
         mv /etc/php/8.3/fpm/pool.d/www.conf /etc/php/8.3/fpm/pool.d/www.conf.disabled
     fi
-    cat > /etc/php/8.3/fpm/pool.d/immo.conf <<EOF
-[immo]
-user = $IMMO_USER
-group = $IMMO_USER
-listen = /run/php/immo.sock
+    # Rev.13: the pool runs as $IMMO_WEB_USER; an old pool running as $IMMO_USER is retired.
+    [[ -f /etc/php/8.3/fpm/pool.d/immo.conf ]] && mv /etc/php/8.3/fpm/pool.d/immo.conf /etc/php/8.3/fpm/pool.d/immo.conf.disabled
+    cat > /etc/php/8.3/fpm/pool.d/immo-web.conf <<EOF
+[immo-web]
+user = $IMMO_WEB_USER
+group = $IMMO_WEB_USER
+listen = /run/php/immo-web.sock
 listen.owner = caddy
 listen.group = caddy
 listen.mode = 0660
@@ -2830,12 +2856,13 @@ pm.max_requests = 500
 ; Rev.13: nextcloud-jwt.pub is the public key for the single sign-on from Nextcloud (sso.php).
 ; Rev.13: the frontend's own credentials file was outside open_basedir - without the
 ; hand fix of 2026-10-07 the web side could not read its database password.
-php_admin_value[open_basedir] = $IMMO_DIR:$HDD_MOUNT/immo:/tmp:/usr/share/php:$IMMO_WEB_ENV:/etc/immo/nextcloud-jwt.pub
+; Rev.13: no longer $IMMO_DIR or $HDD_MOUNT/immo - the frontend reads only its own tree.
+php_admin_value[open_basedir] = $IMMO_WEB_DIR:/var/lib/immo-web:/tmp:/usr/share/php:$IMMO_WEB_ENV:/etc/immo/nextcloud-jwt.pub
 php_admin_value[upload_tmp_dir] = /tmp
 php_admin_value[memory_limit] = 256M
 php_admin_value[post_max_size] = 32M
 php_admin_value[upload_max_filesize] = 32M
-php_admin_value[error_log] = /var/log/php8.3-fpm-immo.log
+php_admin_value[error_log] = /var/log/php8.3-fpm-immo-web.log
 php_admin_flag[expose_php] = off
 ; Rev.13 (Lynis PHP-2376): immo.flow opens no URLs as files (curl only, checked 2026-10-11).
 php_admin_flag[allow_url_fopen] = off
@@ -2856,31 +2883,34 @@ env[IMMO_WEB_ENV] = $IMMO_WEB_ENV
 ; Rev.13: added by hand on 2026-10-07 - "password forgotten" mails need a sender
 ; (the system msmtprc is root-only), sessions need a directory inside open_basedir,
 ; and Ubuntu's session cleanup (gc_probability 0 + cron) only covers /var/lib/php.
-php_admin_value[sendmail_path] = /usr/bin/msmtp -C /etc/immo/msmtprc -t
-php_admin_value[session.save_path] = $IMMO_DIR/sessions
+php_admin_value[sendmail_path] = /usr/bin/msmtp -C /etc/immo/msmtprc-web -t
+php_admin_value[session.save_path] = /var/lib/immo-web/sessions
 php_admin_value[session.gc_probability] = 1
 EOF
-    install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 700 "$IMMO_DIR/sessions" "$IMMO_DIR/sicherung"
-    # Rev.13: the workers run as $IMMO_USER and cannot create a file in /var/log, so the
-    # error log was never written (measured 2026-10-09). Created here, rotated weekly.
-    install -m 640 -o "$IMMO_USER" -g adm /dev/null /var/log/php8.3-fpm-immo.log.new
-    [[ -f /var/log/php8.3-fpm-immo.log ]] && rm -f /var/log/php8.3-fpm-immo.log.new \
-        || mv /var/log/php8.3-fpm-immo.log.new /var/log/php8.3-fpm-immo.log
-    cat > /etc/logrotate.d/php8.3-fpm-immo <<EOF
-/var/log/php8.3-fpm-immo.log {
+    install -d -o "$IMMO_USER" -g "$IMMO_USER" -m 700 "$IMMO_DIR/sicherung"
+    # Rev.13: the workers cannot create a file in /var/log, so the error log was never
+    # written (measured 2026-10-09). Created here, rotated weekly.
+    install -m 640 -o "$IMMO_WEB_USER" -g adm /dev/null /var/log/php8.3-fpm-immo-web.log.new
+    [[ -f /var/log/php8.3-fpm-immo-web.log ]] && rm -f /var/log/php8.3-fpm-immo-web.log.new \
+        || mv /var/log/php8.3-fpm-immo-web.log.new /var/log/php8.3-fpm-immo-web.log
+    rm -f /etc/logrotate.d/php8.3-fpm-immo
+    cat > /etc/logrotate.d/php8.3-fpm-immo-web <<EOF
+/var/log/php8.3-fpm-immo-web.log {
     weekly
     rotate 8
     compress
     missingok
     notifempty
-    create 640 $IMMO_USER adm
+    create 640 $IMMO_WEB_USER adm
 }
 EOF
-    # Sender for the frontend (contact address): its own msmtp file, readable by the
-    # pool user only; the password is read at send time from the Python side's .env
-    # (IMAP_PASS = same mailbox), never copied.
-    if [[ -n "$IMMO_MAIL_FROM" && -n "$SMTP_HOST" ]]; then
-        cat > /etc/immo/msmtprc <<EOF
+    # Rev.13: sender for "password forgotten" is its own mailbox (e.g. noreply@) with its
+    # own password file, readable by the frontend only. Before, the frontend used the
+    # IMAP password of the processing's mailbox (contact@) straight from $IMMO_DIR/.env.
+    if [[ -n "$IMMO_MAIL_FROM" && -n "$SMTP_HOST" && -s "$SECRETS_IN_DIR/smtp-immo-web" ]]; then
+        install -m 640 -o root -g "$IMMO_WEB_USER" /dev/null /etc/immo/web-smtp-pass
+        cat "$SECRETS_IN_DIR/smtp-immo-web" > /etc/immo/web-smtp-pass
+        cat > /etc/immo/msmtprc-web <<EOF
 defaults
 auth on
 tls on
@@ -2890,13 +2920,53 @@ account default
 host $SMTP_HOST
 port $SMTP_PORT
 from $IMMO_MAIL_FROM
-user ${IMAP_USER:-$IMMO_MAIL_FROM}
-passwordeval sed -n 's/^IMAP_PASS=//p' $IMMO_DIR/.env
+user $IMMO_MAIL_FROM
+passwordeval cat /etc/immo/web-smtp-pass
 EOF
-        chown root:"$IMMO_USER" /etc/immo/msmtprc; chmod 640 /etc/immo/msmtprc
+        chown root:"$IMMO_WEB_USER" /etc/immo/msmtprc-web; chmod 640 /etc/immo/msmtprc-web
+        rm -f /etc/immo/msmtprc
     else
-        warn "IMMO_MAIL_FROM or SMTP_HOST empty - /etc/immo/msmtprc not written, 'password forgotten' cannot send."
+        warn "IMMO_MAIL_FROM, SMTP_HOST or $SECRETS_IN_DIR/smtp-immo-web missing - 'password forgotten' cannot send."
     fi
+
+    # Rev.13 (immo_change 2.2): deploy and run without the full sudo password. Two
+    # root-owned commands with fixed sources, targets and script names; the admin may
+    # call exactly these two without a password. Free paths or free commands would turn
+    # them back into full root access, so every argument is checked against a whitelist.
+    cat > /usr/local/sbin/immo-deploy <<EOF
+#!/bin/bash
+# immo-deploy web|code - mirror the upload area of $ADMIN_USER into the live directories.
+set -euo pipefail
+case "\${1:-}" in
+  web)  rsync -rpt --delete --chown=root:$IMMO_WEB_USER --chmod=D750,F640 /home/$ADMIN_USER/immo-web/ $IMMO_WEB_DIR/ ;;
+  code) rsync -rpt --chown=$IMMO_USER:$IMMO_USER --chmod=D750,F640 \\
+            --exclude=.env --exclude=.venv/ --exclude=sicherung/ --exclude=protokolle/ --exclude=daten/ --exclude=web/ \\
+            /home/$ADMIN_USER/immo-code/ $IMMO_DIR/ ;;
+  *)    echo "usage: immo-deploy web|code" >&2; exit 2 ;;
+esac
+logger -t immo-deploy "\$1 deployed by \${SUDO_USER:-root}"
+echo "immo-deploy \$1: done"
+EOF
+    cat > /usr/local/sbin/immo-run <<EOF
+#!/bin/bash
+# immo-run <script> [args] - run one of the fixed Python entry points as $IMMO_USER.
+set -euo pipefail
+s="\${1:-}"; shift || true
+case "\$s" in
+  lauf|angebote|online|rechnen|abruf|db_einspielen) ;;
+  *) echo "usage: immo-run lauf|angebote|online|rechnen|abruf|db_einspielen [args]" >&2; exit 2 ;;
+esac
+for a in "\$@"; do
+  [[ "\$a" =~ ^[-A-Za-z0-9_=.,:/]+\$ && "\$a" != *..* && "\$a" != /* ]] || { echo "argument rejected: \$a" >&2; exit 2; }
+done
+cd $IMMO_DIR
+exec sudo -u $IMMO_USER env -i PATH=/usr/bin:/bin HOME=$IMMO_DIR LANG=C.UTF-8 $IMMO_DIR/.venv/bin/python3 "\$s.py" "\$@"
+EOF
+    chmod 750 /usr/local/sbin/immo-deploy /usr/local/sbin/immo-run
+    printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/immo-deploy, /usr/local/sbin/immo-run\n' "$ADMIN_USER" > /etc/sudoers.d/immo.new
+    chmod 440 /etc/sudoers.d/immo.new
+    visudo -cf /etc/sudoers.d/immo.new >/dev/null && mv /etc/sudoers.d/immo.new /etc/sudoers.d/immo \
+        || { rm -f /etc/sudoers.d/immo.new; warn "sudoers rule for immo-deploy/immo-run rejected by visudo."; }
     systemctl enable --now php8.3-fpm
     systemctl restart php8.3-fpm
 
@@ -2912,7 +2982,7 @@ EOF
     cat > "$CADDY_CONFD/20-immo.caddy" <<EOF
 $immo_sites {
     import protokoll-sso immo
-    root * $IMMO_DIR/web
+    root * $IMMO_WEB_DIR
     encode zstd gzip
     header Strict-Transport-Security "max-age=15552000; includeSubDomains"
     header X-Content-Type-Options nosniff
@@ -2927,7 +2997,7 @@ $immo_sites {
         not path /.well-known/*
     }
     respond @punktdatei 404
-    php_fastcgi unix//run/php/immo.sock
+    php_fastcgi unix//run/php/immo-web.sock
     file_server
 }
 EOF
@@ -3062,7 +3132,7 @@ EOF
     chmod 700 /usr/local/lib/backup-pre.d/10-immo-db.sh
 
     log "Phase 13 done. Database password: $SECRETS_DIR/immo-db-pass"
-    log "Still to do by hand: deploy the code to $IMMO_DIR/web, write $IMMO_DIR/.env"
+    log "Still to do: deploy with hoch.sh and hoch_code.sh (sudo immo-deploy web or code), check $IMMO_DIR/.env"
     log "  (DB_HOST=127.0.0.1, DB_NAME=$IMMO_DB, DB_USER=$IMMO_DB_USER), import the dump."
 }
 
@@ -3213,6 +3283,122 @@ EOF
     # carries the backend secret and the session keys.
     chown 850:850 /srv/talk/server.conf
     chmod 600 /srv/talk/server.conf
+
+    # Rev.13: Janus image built here (see JANUS_IMAGE). Only the videoroom plugin and the
+    # websockets transport stay; '! -type d' also removes the .so symlinks - with -type f
+    # they survived and Janus logged "Couldn't load plugin" for every deleted plugin.
+    # The old image listened on *:8188; the websockets transport is now bound to loopback.
+    install -d -m 750 /srv/talk/janus /srv/talk/janus/conf
+    cat > /srv/talk/janus/Dockerfile <<EOF
+# Janus for Nextcloud Talk from Alpine's janus-gateway package. Rebuilt by janus-rebuild.timer.
+FROM $JANUS_ALPINE
+RUN set -ex; \\
+    apk upgrade --no-cache -a; \\
+    apk add --no-cache janus-gateway; \\
+    find /usr/lib/janus/plugins ! -type d ! -name 'libjanus_videoroom.so*' -delete; \\
+    find /usr/lib/janus/transports ! -type d ! -name 'libjanus_websockets.so*' -delete; \\
+    rm -rf /usr/lib/janus/events/* /usr/lib/janus/loggers/*; \\
+    id janus
+USER janus
+CMD ["janus", "--config=/conf/janus.jcfg", "--configs-folder=/conf", "--disable-colors", "--log-stdout", "--full-trickle", "--debug-level=4"]
+EOF
+    cat > /srv/talk/janus/conf/janus.jcfg <<EOF
+general: {
+	configs_folder = "/conf"
+	debug_level = 4
+	server_name = "$(hostname -s)"
+}
+media: {
+	rtp_port_range = "${JANUS_RTP_MIN}-${JANUS_RTP_MAX}"
+}
+nat: {
+	full_trickle = true
+	ice_ignore_list = "vmnet,docker,br-,veth,wg"
+}
+EOF
+    cat > /srv/talk/janus/conf/janus.transport.websockets.jcfg <<'EOF'
+general: {
+	json = "indented"
+	ws = true
+	ws_port = 8188
+	ws_ip = "127.0.0.1"
+	wss = false
+}
+admin: {
+	admin_ws = false
+	admin_wss = false
+}
+EOF
+    printf 'general: {\n}\n' > /srv/talk/janus/conf/janus.plugin.videoroom.jcfg
+    docker build --pull --no-cache -q -t "$JANUS_IMAGE" /srv/talk/janus >/dev/null \
+        || die "Phase 15: building the Janus image failed."
+    local jid
+    jid="$(docker run --rm --entrypoint id "$JANUS_IMAGE" -u):$(docker run --rm --entrypoint id "$JANUS_IMAGE" -g)"
+    chown -R "$jid" /srv/talk/janus/conf
+    chmod 750 /srv/talk/janus/conf; chmod 640 /srv/talk/janus/conf/*
+    install -d -m 700 /var/cache/trivy
+    cat > /usr/local/sbin/janus-rebuild.sh <<'EOF'
+#!/bin/bash
+# Weekly rebuild of the self-built Janus image (silo-janus) from Alpine's janus-gateway
+# package. Order: build with fresh packages -> Trivy (no fixable CRITICAL) -> swap the
+# container -> health check. Any failure keeps or restores the previous image and mails root.
+set -u
+T=/srv/talk; L=/var/log/janus-rebuild.log; H=$(hostname -s)
+exec >>"$L" 2>&1; echo "== $(date '+%F %T')"
+fail() { echo "FEHLER: $1"; tail -40 "$L" | mail -s "$H: Janus-Neubau fehlgeschlagen ($1)" root; exit 1; }
+old=$(docker image inspect -f '{{.Id}}' silo-janus:aktuell 2>/dev/null || true)
+docker build --pull --no-cache -q -t silo-janus:neu "$T/janus" || fail "Bau"
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v /var/cache/trivy:/root/.cache \
+    aquasec/trivy:latest image --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 silo-janus:neu \
+    || { docker rmi silo-janus:neu >/dev/null; fail "Trivy meldet kritische Luecke"; }
+pk() { docker run --rm --entrypoint sh "$1" -c 'apk info -v 2>/dev/null | sort; ls -R /usr/lib/janus' | md5sum ; }
+if [[ -n $old ]] && [[ "$(pk silo-janus:neu)" == "$(pk silo-janus:aktuell)" ]]; then
+    echo "Pakete unveraendert, kein Tausch"; docker rmi silo-janus:neu >/dev/null; exit 0
+fi
+[[ -n $old ]] && docker tag silo-janus:aktuell silo-janus:vorher
+docker tag silo-janus:neu silo-janus:aktuell; docker rmi silo-janus:neu >/dev/null
+cd "$T" && docker compose up -d janus
+sleep 20
+ok=1
+ss -tln | grep -q '127.0.0.1:8188' || ok=0
+[[ "$(docker inspect -f '{{.State.Running}}' talk-janus-1)" == true ]] || ok=0
+docker restart talk-signaling-1 >/dev/null; sleep 10
+docker logs --since 15s talk-signaling-1 2>&1 | grep -q 'Using janus MCU' || ok=0
+if (( ok == 0 )); then
+    if docker image inspect silo-janus:vorher >/dev/null 2>&1; then
+        docker tag silo-janus:vorher silo-janus:aktuell; docker compose up -d janus; docker restart talk-signaling-1 >/dev/null
+    fi
+    fail "Gesundheitspruefung, vorige Fassung wieder aktiv"
+fi
+echo "getauscht: $(docker run --rm --entrypoint janus silo-janus:aktuell --version | head -1)"
+docker image prune -f >/dev/null
+EOF
+    chmod 750 /usr/local/sbin/janus-rebuild.sh
+    cat > /etc/systemd/system/janus-rebuild.service <<'EOF'
+[Unit]
+Description=Rebuild the Janus image for Nextcloud Talk from current Alpine packages
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/janus-rebuild.sh
+EOF
+    cat > /etc/systemd/system/janus-rebuild.timer <<'EOF'
+[Unit]
+Description=Janus image rebuild, Sundays 05:15
+
+[Timer]
+OnCalendar=Sun *-*-* 05:15:00
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now janus-rebuild.timer
+
     cat > /srv/talk/docker-compose.yml <<EOF
 # Rev.10 FIX: all three services run on the HOST network. Janus needs it anyway -
 # its RTP range would otherwise require one userland proxy per UDP port - and a
@@ -3233,6 +3419,8 @@ services:
 
   janus:
     image: $JANUS_IMAGE
+    volumes:
+      - ./janus/conf:/conf:ro
     restart: unless-stopped
     mem_limit: 2g
     pids_limit: 512
@@ -3498,25 +3686,31 @@ verify() {
     chk "Nextcloud site file present"      "test -f /etc/caddy/conf.d/10-nextcloud.caddy"
     if [[ "$ENABLE_IMMO" == "yes" ]]; then
         chk "immo: php8.3-fpm running"     "systemctl is-active php8.3-fpm"
-        chk "immo: FPM socket present"     "test -S /run/php/immo.sock"
+        chk "immo: FPM socket present"     "test -S /run/php/immo-web.sock"
         chk "immo: MariaDB on loopback"    "ss -tln | grep -q '127.0.0.1:3306'"
         chk "immo: MariaDB NOT public"     "! ss -tln | grep -qE '(0\\.0\\.0\\.0|\\*):3306'"
         chk "immo: database exists"        "mariadb -N -e \"SHOW DATABASES\" | grep -qx \"$IMMO_DB\""
         chk "immo: Caddy site file"        "test -f /etc/caddy/conf.d/20-immo.caddy"
         chk "immo: frame-ancestors set"    "grep -q 'frame-ancestors' /etc/caddy/conf.d/20-immo.caddy"
-        chk "immo: SameSite=Lax in pool"   "grep -q 'session.cookie_samesite. = Lax' /etc/php/8.3/fpm/pool.d/immo.conf"
-        chk "immo: allow_url_fopen off"    "grep -q '^php_admin_flag.allow_url_fopen. = off' /etc/php/8.3/fpm/pool.d/immo.conf"
-        chk "immo: env[IMMO_WEB_ENV] set"   "grep -q '^env\\[IMMO_WEB_ENV\\]' /etc/php/8.3/fpm/pool.d/immo.conf"
+        P=/etc/php/8.3/fpm/pool.d/immo-web.conf
+        chk "immo: SameSite=Lax in pool"   "grep -q 'session.cookie_samesite. = Lax' $P"
+        chk "immo: allow_url_fopen off"    "grep -q '^php_admin_flag.allow_url_fopen. = off' $P"
+        chk "immo: env[IMMO_WEB_ENV] set"   "grep -q '^env\\[IMMO_WEB_ENV\\]' $P"
+        chk "immo: pool runs as $IMMO_WEB_USER" "grep -q '^user = $IMMO_WEB_USER' $P && test ! -f /etc/php/8.3/fpm/pool.d/immo.conf"
         chk "immo: .env 600 and immo-owned" "[[ \"\$(stat -c '%a %U' \"$IMMO_DIR/.env\")\" == \"600 $IMMO_USER\" ]]"
-        chk "immo: web.env 640 root:$IMMO_USER" "[[ \"\$(stat -c '%a %U:%G' \"$IMMO_WEB_ENV\")\" == \"640 root:$IMMO_USER\" ]]"
-        chk "immo: web.env without IMAP"    "! grep -q '^IMAP_' \"$IMMO_WEB_ENV\""
+        chk "immo: web env 640 root:$IMMO_WEB_USER" "[[ \"\$(stat -c '%a %U:%G' \"$IMMO_WEB_ENV\")\" == \"640 root:$IMMO_WEB_USER\" ]]"
+        chk "immo: web env without IMAP"    "! grep -q '^IMAP_' \"$IMMO_WEB_ENV\""
+        chk "immo: frontend cannot read .env" "! sudo -u $IMMO_WEB_USER test -r \"$IMMO_DIR/.env\""
+        chk "immo: frontend DB user without DDL" "! mariadb -N -e \"SHOW GRANTS FOR '$IMMO_WEB_DB_USER'@'127.0.0.1'\" | grep -qE 'ALL PRIVILEGES|CREATE|DROP|ALTER'"
+        chk "immo: caddy not in group $IMMO_USER" "! id -nG caddy | tr ' ' '\\n' | grep -qx $IMMO_USER"
         chk "immo: IMAP port 993 not 995"   "! grep -q '^IMAP_PORT=995' \"$IMMO_DIR/.env\""
         chk "immo: timer active (or off, no venv)" "[[ ! -x \"$IMMO_DIR/.venv/bin/python3\" ]] || systemctl is-active immo-lauf.timer"
         chk "immo: Borg pre-hook"          "test -x /usr/local/lib/backup-pre.d/10-immo-db.sh"
-        chk "immo: web.env in open_basedir" "grep -q 'open_basedir.*$IMMO_WEB_ENV' /etc/php/8.3/fpm/pool.d/immo.conf"
-        chk "immo: sessions dir 700"        "[[ \"\$(stat -c %a $IMMO_DIR/sessions)\" == 700 ]]"
-        chk "immo: sendmail via /etc/immo/msmtprc" "grep -q 'sendmail_path.*/etc/immo/msmtprc' /etc/php/8.3/fpm/pool.d/immo.conf"
-        chk "immo: PHP error log writable"  "[[ \"\$(stat -c %U /var/log/php8.3-fpm-immo.log 2>/dev/null)\" == $IMMO_USER ]]"
+        chk "immo: web env in open_basedir" "grep -q 'open_basedir.*$IMMO_WEB_ENV' $P"
+        chk "immo: sessions dir 700"        "[[ \"\$(stat -c %a /var/lib/immo-web/sessions)\" == 700 ]]"
+        chk "immo: sendmail via msmtprc-web" "grep -q 'sendmail_path.*/etc/immo/msmtprc-web' $P"
+        chk "immo: PHP error log writable"  "[[ \"\$(stat -c %U /var/log/php8.3-fpm-immo-web.log 2>/dev/null)\" == $IMMO_WEB_USER ]]"
+        chk "immo: deploy/run sudo rule"    "visudo -cf /etc/sudoers.d/immo >/dev/null && test -x /usr/local/sbin/immo-deploy && test -x /usr/local/sbin/immo-run"
         chk "immo: failure mails via template" "grep -q 'immo-fail-mail@' /etc/systemd/system/immo-lauf.service && test ! -e /etc/systemd/system/immo-fail-mail.service"
         chk "immo: reports on data volume" "test -d \"$HDD_MOUNT/immo/Kaufpreise\""
     fi
@@ -3566,8 +3760,13 @@ verify() {
     if [[ "$ENABLE_EXTRA_SITES" == "yes" ]]; then
         chk "websites owned by root"       "! find /srv/www -mindepth 1 ! -user root | grep -q ."
     fi
+    if [[ "$ENABLE_TALK_HPB" == "yes" ]]; then
+        chk "Talk: Janus self-built image"  "[[ \"\$(docker inspect -f '{{.Config.Image}}' talk-janus-1 2>/dev/null)\" == \"$JANUS_IMAGE\" ]]"
+        chk "Talk: Janus ws on loopback only" "ss -tln | grep -q '127.0.0.1:8188' && ! ss -tln | grep ':8188' | grep -vq '127.0.0.1'"
+        chk "Talk: Janus rebuild timer"     "systemctl is-active -q janus-rebuild.timer"
+    fi
     if [[ "$ENABLE_CLAMAV" == "yes" ]]; then
-        chk "ClamAV daemon socket"         "test -S /var/run/clamav/clamd.ctl"
+        chk "ClamAV daemon socket"        "test -S /var/run/clamav/clamd.ctl"
         chk "NC files_antivirus enabled"   "docker exec -u www-data nextcloud-app-1 php occ app:list --enabled | grep -q files_antivirus"
     fi
 
