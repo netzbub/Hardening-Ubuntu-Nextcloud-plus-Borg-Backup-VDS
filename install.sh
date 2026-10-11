@@ -572,6 +572,11 @@ $NC_DOMAIN {
     redir /.well-known/carddav /remote.php/dav/ 301
     redir /.well-known/caldav  /remote.php/dav/ 301
 $sig
+    # Rev.13: Client Push (notify_push, container from phase 9)
+    handle_path /push/* {
+        reverse_proxy 127.0.0.1:7867
+    }
+
     handle {
         reverse_proxy 127.0.0.1:8080
     }
@@ -2166,6 +2171,29 @@ services:
       - ./html:/var/www/html
       - ${NCDATA_DIR}:/var/www/html/data$NC_CLAMAV_MOUNT
 
+  # Rev.13 (2026-10-11): Client Push. The binary ships with the app notify_push (installed
+  # by nc-post-setup.sh, which also starts this service); it reads the database settings
+  # from config.php, Redis and the Nextcloud URL come from the environment because
+  # redis.config.php only holds getenv(). After an app update: docker compose restart notify_push.
+  notify_push:
+    image: nextcloud:${NC_IMAGE_TAG}
+    restart: unless-stopped
+    mem_limit: 256m
+    pids_limit: 64
+    security_opt: [ "no-new-privileges:true" ]
+    user: "33:33"
+    entrypoint: [ "/var/www/html/custom_apps/notify_push/bin/x86_64/notify_push", "/var/www/html/config/config.php" ]
+    ports:
+      - "127.0.0.1:7867:7867"
+    depends_on:
+      app: { condition: service_started }
+    environment:
+      PORT: "7867"
+      NEXTCLOUD_URL: http://app
+      REDIS_URL: redis://redis
+    volumes:
+      - ./html:/var/www/html:ro
+
 secrets:
   db_root:  { file: ./secrets/db_root.txt }
   db_pass:  { file: ./secrets/db_pass.txt }
@@ -2260,20 +2288,29 @@ $OCC app:install external 2>/dev/null || $OCC app:enable external
 # Rev.13: app set and sharing policy of silo as measured on 2026-10-11 (set by hand on
 # 2026-10-09). eurooffice and files_antivirus come from phase16/17. A missing app is
 # reported, not fatal - the app store may lag behind a new Nextcloud release.
-for a in approval calendar camerarawpreviews classic_appmenu collectives contacts deck \
+for a in approval calendar camerarawpreviews classic_appmenu contacts deck \
          diskmap drawio extended_occweb files_3dmodelviewer files_accesscontrol \
          files_automatedtagging files_mindmap files_zip fileviewer forms gpxpod groupfolders \
          guests integration_openstreetmap maps memories notes phonetrack quota_warning \
-         share_audit_dashboard sketch_picker spreed tables tasks twofactor_webauthn; do
+         share_audit_dashboard side_menu sketch_picker spreed tasks twofactor_webauthn; do
     $OCC app:install "$a" >/dev/null 2>&1 || $OCC app:enable "$a" >/dev/null 2>&1 \
         || echo "WARN: app $a not available"
 done
 # Apps that phone home or are not wanted (weather: met.no/nominatim, survey, support,
-# announcements: pushfeed.nextcloud.com) - the owner 2026-10-09.
-for a in circles federation nextcloud_announcements office recommendations support \
-         survey_client weather_status; do
+# announcements: pushfeed.nextcloud.com) - the owner 2026-10-09. Tables, Collectives and
+# Better App Menu switched off by the owner on 2026-10-11 (side_menu is the menu).
+for a in better_app_menu circles collectives federation nextcloud_announcements office \
+         recommendations support survey_client tables weather_status; do
     $OCC app:disable "$a" >/dev/null 2>&1 || true
 done
+# Rev.13 (2026-10-11): Client Push - app first (it ships the binary), then the container
+# from the compose file, then setup with self-test against the Caddy route /push/.
+if $OCC app:install notify_push >/dev/null 2>&1 || $OCC app:enable notify_push >/dev/null 2>&1; then
+    $C up -d notify_push >/dev/null 2>&1 && sleep 5
+    $OCC notify_push:setup "https://$NC_DOMAIN/push" || echo "WARN: notify_push self-test failed"
+else
+    echo "WARN: app notify_push not available"
+fi
 for g in Baubeteiligte immo.flow; do $OCC group:add "$g" >/dev/null 2>&1 || true; done
 # Sharing: no resharing, read-only by default, links only with password and max. 14 days,
 # no upload via links, sharing only within the own group (admin exempt), no links for
@@ -2349,7 +2386,7 @@ EOF
     systemctl daemon-reload
     systemctl enable nc-preview.timer
     {
-        printf 'NC_PHONE_REGION=%q\nNC_MAINT_WINDOW=%q\nNC_LOGLEVEL=%q\n' "$NC_PHONE_REGION" "$NC_MAINT_WINDOW" "$NC_LOGLEVEL"
+        printf 'NC_PHONE_REGION=%q\nNC_MAINT_WINDOW=%q\nNC_LOGLEVEL=%q\nNC_DOMAIN=%q\n' "$NC_PHONE_REGION" "$NC_MAINT_WINDOW" "$NC_LOGLEVEL" "$NC_DOMAIN"
         printf 'NC_MAIL_FROM=%q\nNC_MAIL_DOMAIN=%q\nSMTP_HOST=%q\nSMTP_PORT=%q\nSECRETS_IN_DIR=%q\n' \
             "$NC_MAIL_FROM" "$NC_MAIL_DOMAIN" "$SMTP_HOST" "$SMTP_PORT" "$SECRETS_IN_DIR"
     } > /etc/nc-post-setup.env
@@ -3761,6 +3798,7 @@ verify() {
     # Rev.10 - Caddy split into one file per site:
     chk "Caddyfile imports conf.d"         "grep -q 'import /etc/caddy/conf.d' /etc/caddy/Caddyfile"
     chk "Nextcloud site file present"      "test -f /etc/caddy/conf.d/10-nextcloud.caddy"
+    chk "Client Push (notify_push) running" "docker inspect -f '{{.State.Running}}' nextcloud-notify_push-1 | grep -qx true && grep -q 'handle_path /push/' /etc/caddy/conf.d/10-nextcloud.caddy"
     if [[ "$ENABLE_IMMO" == "yes" ]]; then
         chk "immo: php8.3-fpm running"     "systemctl is-active php8.3-fpm"
         chk "immo: FPM socket present"     "test -S /run/php/immo-web.sock"
