@@ -10,9 +10,12 @@ All notable changes to this project are documented here. Versions follow a SemVe
 - **Second mail sender** `SMTP_ALARM_FROM` with its own password file; input secrets are read from `SECRETS_IN_DIR` files, never sourced.
 - **WireGuard peer list** `WG_PEERS`; changes are applied with `wg syncconf` instead of a tunnel restart.
 - **Nextcloud base settings** in `nc-post-setup.sh`: phone region, maintenance window, log level 2, `app_api` off, database repairs, SMTP sender `NC_MAIL_FROM` with password from `SECRETS_IN_DIR/smtp-next`.
+- **Nextcloud app set and sharing policy** in `nc-post-setup.sh` (measured on silo 2026-10-11): 33 apps (Deck, Tasks, Notes, Forms, Collectives, Tables, Guests, WebAuthn, draw.io, ...), eight apps off (no phone-home), groups `Baubeteiligte` and `immo.flow`, 21 sharing keys (no resharing, read-only default, link password and 14-day expiry enforced, no public upload, own group only with admin exempt, no links for Baubeteiligte, no federation, no lookup server), trash bin `14, 14`. Three new `verify` checks.
+- **Moving `$HDD_MOUNT`**: note in phase 9 that docker `live-restore` keeps containers on the old mount.
 - **immo.flow online check** units (`IMMO_ONLINE_TIMES`), failure-mail template `immo-fail-mail@.service`, `IMMO_DOMAIN` as a list.
 - `verify`: socket masked, no ECDSA host key, post-quantum kex, Borg archive age and `compact`, daily Borg timer, dump permissions, Caddy origin against the Release file, Caddy access log and its write permission, AIDE time, Lynis profile, cloud-init off, preview timer, reminder timer, fail2ban mail setting, alarm account, Livepatch, website ownership, ClamAV, and five immo checks.
 - **Caddy access logs**: snippet `(protokoll)` in the Caddyfile, `import protokoll <name>` in every site block, JSON per site under `/var/log/caddy/`, rolled by Caddy (50 MiB x 10, 30 days, 0640). The sandbox drop-in allows writing there; log files are handed to user `caddy` after `caddy validate`.
+- Single sign-on groundwork for immo.flow: Caddy snippet `(protokoll-sso)` drops the query parameter `t` from the immo log; `nc-post-setup.sh` writes the External sites JWT public key to `/etc/immo/nextcloud-jwt.pub`, which phase 13 adds to `open_basedir`.
 - `/etc/lynis/custom.prf` with nine reasoned exceptions (phase 4).
 - Nextcloud: apps `previewgenerator` and `external` in `nc-post-setup.sh`; timer `nc-preview` (06:15) runs `preview:pre-generate`.
 - cloud-init is disabled in phase 12 (`/etc/cloud/cloud-init.disabled`).

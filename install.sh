@@ -515,6 +515,23 @@ write_caddy_base() {
         format json
     }
 }
+# immo.flow: same log, but the query parameter t (Nextcloud JWT for sso.php) is removed
+(protokoll-sso) {
+    log {
+        output file /var/log/caddy/{args[0]}.log {
+            roll_size 50MiB
+            roll_keep 10
+            roll_keep_for 720h
+            mode 0640
+        }
+        format filter {
+            request>uri query {
+                delete t
+            }
+            wrap json
+        }
+    }
+}
 import $CADDY_CONFD/*.caddy
 EOF
     chmod 644 /etc/caddy/Caddyfile          # must be readable by user 'caddy' (Review K3)
@@ -948,6 +965,11 @@ skip-test=TOOL-5002
 skip-test=FINT-4402
 # password ageing: no forced expiry (NIST SP 800-63B), reminder via admin-pw-reminder
 skip-test=AUTH-9286
+# debsums runs weekly via /etc/cron.weekly/debsums-check (phase7), not via CRON_CHECK
+skip-test=PKGS-7370
+# Docker and WireGuard need IP forwarding and load kernel modules on demand
+skip-test=KRNL-6000:net.ipv4.conf.all.forwarding
+skip-test=KRNL-6000:kernel.modules_disabled
 EOF
 
     if [[ -n "$SMTP_HOST" && -n "$SMTP_USER" ]]; then
@@ -1872,6 +1894,10 @@ EOF
     #   UUID=$(blkid -s UUID -o value /dev/sdb1)
     #   echo "UUID=$UUID $HDD_MOUNT ext4 defaults,nosuid,nodev,nofail,x-systemd.device-timeout=30 0 2" >> /etc/fstab
     #   systemctl daemon-reload && mount "$HDD_MOUNT"
+    # Moving $HDD_MOUNT to another disk later: docker runs with live-restore, so
+    # 'systemctl stop docker' leaves the containers running on the OLD mount. Stop the
+    # containers that bind $HDD_MOUNT ('docker compose stop app cron') before the final
+    # rsync and start them again after the remount (seen 2026-10-11).
     install -d "$HDD_MOUNT"
     if ! mountpoint -q "$HDD_MOUNT"; then
         warn "HDD is NOT mounted at $HDD_MOUNT - NC data would land on the NVMe!"
@@ -2164,6 +2190,70 @@ fi
 # inside Nextcloud); the site entries themselves are set by hand in the admin settings.
 $OCC app:install previewgenerator 2>/dev/null || $OCC app:enable previewgenerator
 $OCC app:install external 2>/dev/null || $OCC app:enable external
+# Rev.13: app set and sharing policy of silo as measured on 2026-10-11 (set by hand on
+# 2026-10-09). eurooffice and files_antivirus come from phase16/17. A missing app is
+# reported, not fatal - the app store may lag behind a new Nextcloud release.
+for a in approval calendar camerarawpreviews classic_appmenu collectives contacts deck \
+         diskmap drawio extended_occweb files_3dmodelviewer files_accesscontrol \
+         files_automatedtagging files_mindmap files_zip fileviewer forms gpxpod groupfolders \
+         guests integration_openstreetmap maps memories notes phonetrack quota_warning \
+         share_audit_dashboard sketch_picker spreed tables tasks twofactor_webauthn; do
+    $OCC app:install "$a" >/dev/null 2>&1 || $OCC app:enable "$a" >/dev/null 2>&1 \
+        || echo "WARN: app $a not available"
+done
+# Apps that phone home or are not wanted (weather: met.no/nominatim, survey, support,
+# announcements: pushfeed.nextcloud.com) - the owner 2026-10-09.
+for a in circles federation nextcloud_announcements office recommendations support \
+         survey_client weather_status; do
+    $OCC app:disable "$a" >/dev/null 2>&1 || true
+done
+for g in Baubeteiligte immo.flow; do $OCC group:add "$g" >/dev/null 2>&1 || true; done
+# Sharing: no resharing, read-only by default, links only with password and max. 14 days,
+# no upload via links, sharing only within the own group (admin exempt), no links for
+# Baubeteiligte, no federation, no global address book.
+cs() { $OCC config:app:set core "$1" --value="$2" >/dev/null; }
+cb() { $OCC config:app:set core "$1" --type=boolean --value="$2" >/dev/null; }
+cs shareapi_allow_resharing no
+cs shareapi_default_permissions 1
+cb shareapi_enable_link_password_by_default true
+cb shareapi_enforce_links_password true
+cb shareapi_default_expire_date true
+cb shareapi_enforce_expire_date true
+cs shareapi_expire_after_n_days 14
+cs shareapi_default_internal_expire_date yes
+cs shareapi_enforce_internal_expire_date no
+cs shareapi_internal_expire_after_n_days 90
+cs shareapi_allow_public_upload no
+cs shareapi_allow_view_without_download no
+cb shareapi_allow_federation_on_public_shares false
+cs shareapi_only_share_with_group_members yes
+cs shareapi_only_share_with_group_members_exclude_group_list '["admin"]'
+cs shareapi_allow_links_exclude_groups '["Baubeteiligte"]'
+cs shareapi_restrict_user_enumeration_to_group yes
+cs shareapi_restrict_user_enumeration_full_match yes
+cs shareapi_restrict_user_enumeration_full_match_user_id yes
+cs shareapi_restrict_user_enumeration_full_match_email yes
+cs shareapi_restrict_user_enumeration_full_match_displayname no
+for k in incoming_server2server_share_enabled incoming_server2server_group_share_enabled \
+         outgoing_server2server_share_enabled outgoing_server2server_group_share_enabled \
+         lookupServerEnabled lookupServerUploadEnabled; do
+    $OCC config:app:set files_sharing "$k" --value=no >/dev/null
+done
+$OCC config:app:set federatedfilesharing federatedTrustedShareAutoAccept --value=no >/dev/null
+# Trash bin: delete after exactly 14 days.
+$OCC config:system:set trashbin_retention_obligation --value="14, 14"
+# Rev.13: public key of the External sites JWT ({jwt} placeholder, ES256) for the
+# single sign-on of immo.flow (sso.php). Nextcloud creates the key pair on the first
+# page load of a logged-in user - if it is missing, run this script again later.
+if [[ -d /etc/immo ]]; then
+    if pub="$($OCC config:app:get external jwt_token_pubkey_es256 2>/dev/null)" && [[ -n "$pub" ]]; then
+        printf '%s\n' "$pub" > /etc/immo/nextcloud-jwt.pub
+        chown root:immo /etc/immo/nextcloud-jwt.pub; chmod 640 /etc/immo/nextcloud-jwt.pub
+        echo "immo.flow: /etc/immo/nextcloud-jwt.pub written."
+    else
+        echo "immo.flow: no JWT key yet - log in to Nextcloud once, then run this script again."
+    fi
+fi
 $OCC setupchecks || true
 EOF
     chmod 700 /usr/local/bin/nc-post-setup.sh
@@ -2569,6 +2659,31 @@ EOF
         printf '[Timer]\nOnCalendar=\nOnCalendar=%s\nRandomizedDelaySec=5min\n' "${t#*|}" \
             > "/etc/systemd/system/${t%%|*}.d/10-zeit.conf"
     done
+    # Rev.13: AIDE never mailed (server mails M4, 2026-10-11). Cause: the package job runs
+    # as _aide with NoNewPrivileges-like hardening, mail(1) goes through msmtp, and
+    # /etc/msmtprc is root 600 - so dailyaidecheck only logs "not possible to use mail(1)"
+    # (plus "fold: Broken pipe"). Fix: the job stays non-root and silent; a root
+    # ExecStopPost mails the report only if AIDE found differences or the report is missing.
+    cat > /usr/local/sbin/aide-mail.sh <<'EOF'
+#!/bin/bash
+# Mails the AIDE report as root. Silent when AIDE found no differences.
+set -u
+L=/var/log/aide/aide.log
+H=$(hostname -s)
+if [[ ! -s $L || $(( $(date +%s) - $(stat -c %Y "$L") )) -gt 7200 ]]; then
+    echo "No current AIDE report in $L." | mail -s "$H: AIDE report missing" root
+    exit 0
+fi
+grep -q 'found NO differences' "$L" && exit 0
+{ echo "AIDE report of $(date -r "$L" '+%F %T'), first 400 lines:"; echo; head -n 400 "$L"; } \
+    | mail -s "$H: AIDE found differences" root
+EOF
+    chmod 750 /usr/local/sbin/aide-mail.sh
+    install -d /etc/systemd/system/dailyaidecheck.service.d
+    printf '[Service]\nExecStopPost=+/usr/local/sbin/aide-mail.sh\n' \
+        > /etc/systemd/system/dailyaidecheck.service.d/20-mail.conf
+    grep -q '^SILENTREPORTS=' /etc/default/aide 2>/dev/null \
+        || echo 'SILENTREPORTS=yes' >> /etc/default/aide
     systemctl daemon-reload
 
     # Rev.13: cloud-init has done its job after the first boot; switched off so that a
@@ -2712,15 +2827,18 @@ pm = ondemand
 pm.max_children = 10
 pm.process_idle_timeout = 60s
 pm.max_requests = 500
+; Rev.13: nextcloud-jwt.pub is the public key for the single sign-on from Nextcloud (sso.php).
 ; Rev.13: the frontend's own credentials file was outside open_basedir - without the
 ; hand fix of 2026-10-07 the web side could not read its database password.
-php_admin_value[open_basedir] = $IMMO_DIR:$HDD_MOUNT/immo:/tmp:/usr/share/php:$IMMO_WEB_ENV
+php_admin_value[open_basedir] = $IMMO_DIR:$HDD_MOUNT/immo:/tmp:/usr/share/php:$IMMO_WEB_ENV:/etc/immo/nextcloud-jwt.pub
 php_admin_value[upload_tmp_dir] = /tmp
 php_admin_value[memory_limit] = 256M
 php_admin_value[post_max_size] = 32M
 php_admin_value[upload_max_filesize] = 32M
 php_admin_value[error_log] = /var/log/php8.3-fpm-immo.log
 php_admin_flag[expose_php] = off
+; Rev.13 (Lynis PHP-2376): immo.flow opens no URLs as files (curl only, checked 2026-10-11).
+php_admin_flag[allow_url_fopen] = off
 ; The session cookie attributes that the embedding into Nextcloud needs. Setting
 ; them in the pool rather than in the application means no PHP file has to change
 ; and no later code edit can silently drop them again.
@@ -2793,7 +2911,7 @@ EOF
     done
     cat > "$CADDY_CONFD/20-immo.caddy" <<EOF
 $immo_sites {
-    import protokoll immo
+    import protokoll-sso immo
     root * $IMMO_DIR/web
     encode zstd gzip
     header Strict-Transport-Security "max-age=15552000; includeSubDomains"
@@ -3352,11 +3470,15 @@ verify() {
     chk "ubuntu user removed"              "! id ubuntu"
     chk "AIDE DB present"                  "test -s /var/lib/aide/aide.db"
     chk "AIDE check from 05:00"            "systemctl cat dailyaidecheck.timer | grep -q '^OnCalendar=\\*-\\*-\\* 05:45'"
-    chk "Lynis custom.prf present"         "grep -q '^skip-test=' /etc/lynis/custom.prf"
+    chk "AIDE report mailed as root"       "test -x /usr/local/sbin/aide-mail.sh && systemctl cat dailyaidecheck.service | grep -q 'ExecStopPost=+/usr/local/sbin/aide-mail.sh'"
+    chk "Lynis custom.prf present"        "grep -q '^skip-test=' /etc/lynis/custom.prf"
     chk "cloud-init disabled"              "test -f /etc/cloud/cloud-init.disabled || test ! -d /etc/cloud"
     chk "Caddy may write /var/log/caddy"   "systemctl show caddy -p ReadWritePaths | grep -q /var/log/caddy"
     chk "Caddy access log active"          "test -s /var/log/caddy/next.log"
     chk "NC preview timer active"          "systemctl is-active -q nc-preview.timer"
+    chk "NC apps deck+guests+webauthn"     "docker exec -u www-data nextcloud-app-1 php occ app:list --enabled | grep -qE '^  - deck:' && docker exec -u www-data nextcloud-app-1 php occ app:list --enabled | grep -q twofactor_webauthn && docker exec -u www-data nextcloud-app-1 php occ app:list --enabled | grep -q 'guests:'"
+    chk "NC links need password, 14 days"  "[[ \"\$(docker exec -u www-data nextcloud-app-1 php occ config:app:get core shareapi_enforce_links_password)\" =~ ^(1|true|yes)$ && \"\$(docker exec -u www-data nextcloud-app-1 php occ config:app:get core shareapi_expire_after_n_days)\" == 14 ]]"
+    chk "NC trash bin 14 days"             "[[ \"\$(docker exec -u www-data nextcloud-app-1 php occ config:system:get trashbin_retention_obligation)\" == '14, 14' ]]"
     chk "GRUB without apparmor boot param" "! grep -rq 'apparmor=1' /etc/default/grub.d/ 2>/dev/null"
     # Rev.8 - the six findings from the CIS audit on the test server, 2026-10-03:
     chk "sshd Banner active"               "sshd -T 2>/dev/null | grep -qi '^banner /etc/issue.net'"
@@ -3383,6 +3505,7 @@ verify() {
         chk "immo: Caddy site file"        "test -f /etc/caddy/conf.d/20-immo.caddy"
         chk "immo: frame-ancestors set"    "grep -q 'frame-ancestors' /etc/caddy/conf.d/20-immo.caddy"
         chk "immo: SameSite=Lax in pool"   "grep -q 'session.cookie_samesite. = Lax' /etc/php/8.3/fpm/pool.d/immo.conf"
+        chk "immo: allow_url_fopen off"    "grep -q '^php_admin_flag.allow_url_fopen. = off' /etc/php/8.3/fpm/pool.d/immo.conf"
         chk "immo: env[IMMO_WEB_ENV] set"   "grep -q '^env\\[IMMO_WEB_ENV\\]' /etc/php/8.3/fpm/pool.d/immo.conf"
         chk "immo: .env 600 and immo-owned" "[[ \"\$(stat -c '%a %U' \"$IMMO_DIR/.env\")\" == \"600 $IMMO_USER\" ]]"
         chk "immo: web.env 640 root:$IMMO_USER" "[[ \"\$(stat -c '%a %U:%G' \"$IMMO_WEB_ENV\")\" == \"640 root:$IMMO_USER\" ]]"
