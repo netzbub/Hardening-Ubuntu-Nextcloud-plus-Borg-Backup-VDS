@@ -563,10 +563,12 @@ write_caddy_nextcloud() {
     }
 "
     fi
+    # Rev.13: HSTS one year on every site - internet.nl rates 180 days as insufficient
+    # (test of 2026-10-11, all four names 78 %).
     cat > "$CADDY_CONFD/10-nextcloud.caddy" <<EOF
 $NC_DOMAIN {
     import protokoll next
-    header Strict-Transport-Security "max-age=15552000; includeSubDomains"
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
     redir /.well-known/carddav /remote.php/dav/ 301
     redir /.well-known/caldav  /remote.php/dav/ 301
 $sig
@@ -1214,7 +1216,7 @@ EOF
     # --- Rev.8 (CIS ensure_pam_wheel_group_empty): /etc/pam.d/su already restricts
     # su to group 'sudo'. CIS additionally wants an EMPTY group named 'wheel' to
     # exist, so a future 'group=wheel' line can never match a real account. Creating
-    # it is free; su stays bound to group 'sudo', which is the practical equivalent.
+    # it is free. Rev.13: su is now bound to this empty group (phase 1), i.e. su is off.
     getent group wheel >/dev/null || groupadd -r wheel
 
     # --- Rev.8 (CIS account_disable_post_pw_expiration) ---
@@ -1441,10 +1443,11 @@ BANNEREOF
     admin_pw_reminder
     printf 'TMOUT=%s\nreadonly TMOUT\nexport TMOUT\n' "$SHELL_TMOUT" > /etc/profile.d/99-tmout.sh; chmod 644 /etc/profile.d/99-tmout.sh
     printf 'umask 027\n' > /etc/profile.d/99-umask.sh; chmod 644 /etc/profile.d/99-umask.sh
-    # su only for members of the sudo group - ONLY if the admin is in it (else lock-out risk):
+    # Rev.13 (usg/CIS 2026-10-11): su only for the EMPTY group wheel, i.e. for nobody -
+    # root is reached via sudo alone. ONLY if the admin is in the sudo group (else lock-out):
     if id -nG "$ADMIN_USER" | grep -qw sudo; then
         backup_file /etc/pam.d/su
-        sed -i -E '0,/^[#[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so.*/s//auth       required   pam_wheel.so use_uid group=sudo/' /etc/pam.d/su
+        sed -i -E '0,/^[#[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so.*/s//auth       required   pam_wheel.so use_uid group=wheel/' /etc/pam.d/su
     else
         warn "$ADMIN_USER not in the sudo group - su restriction NOT applied (lock-out protection)."
     fi
@@ -1761,6 +1764,20 @@ phase9() {
         apt-get update -q
         apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
     fi
+    # Rev.13 (Docker Bench 1.1.x, 2026-10-11): audit changes to the Docker and containerd
+    # binaries, units and configs. /var/lib/docker and /run/containerd stay out - they
+    # change all the time and would flood the audit log. Only existing paths, otherwise
+    # 'augenrules --load' aborts.
+    local dp
+    {
+        for dp in /usr/bin/dockerd /usr/bin/containerd /usr/bin/containerd-shim-runc-v2 /usr/bin/runc \
+                  /usr/lib/systemd/system/docker.service /usr/lib/systemd/system/docker.socket \
+                  /etc/containerd/config.toml /etc/default/docker; do
+            [[ -e "$dp" ]] && printf -- '-w %s -p wa -k docker\n' "$dp"
+        done
+    } > /etc/audit/rules.d/50-docker.rules
+    chmod 600 /etc/audit/rules.d/50-docker.rules
+    augenrules --load >/dev/null || warn "augenrules --load failed after the Docker rules."
     # Log rotation + default hardening: no-new-privileges as the daemon default (Review M2),
     # userland-proxy off (smaller attack surface, fewer open sockets).
     # "ipv6": false = Docker default, pinned EXPLICITLY here (Council-Fix 5):
@@ -2636,7 +2653,16 @@ phase12() {
     # and for every later volume change; purging it and reinstalling it under time
     # pressure during a maintenance window is the wrong trade. The daemon is the risk,
     # not the binary - so mask that instead (CIS service_rsyncd_disabled).
-    apt-get purge -y -q telnet inetutils-telnet ftp tnftp 2>/dev/null || true
+    # Rev.13 FIX: coturn (phase 15) Depends: telnet. Purging telnet on a box with coturn
+    # removed coturn together with /etc/turnserver.conf (production, 2026-10-11) - TURN
+    # for Talk was down until phase-15 values were restored. telnet stays with coturn.
+    if dpkg -s coturn >/dev/null 2>&1; then
+        apt-get purge -y -q ftp tnftp 2>/dev/null || true
+    else
+        apt-get purge -y -q telnet inetutils-telnet ftp tnftp 2>/dev/null || true
+    fi
+    # Rev.13 (2026-10-11): VMware guest tools and iSCSI have no use on a KVM/QEMU VPS.
+    apt-get purge -y -q open-vm-tools open-iscsi 2>/dev/null || true
     systemctl mask rsync.service 2>/dev/null || true
     dpkg -l 2>/dev/null | awk '/^rc/{print $2}' | xargs -r dpkg --purge >/dev/null 2>&1 || true
     apt-get autoremove --purge -y -q 2>/dev/null || true
@@ -2984,10 +3010,12 @@ $immo_sites {
     import protokoll-sso immo
     root * $IMMO_WEB_DIR
     encode zstd gzip
-    header Strict-Transport-Security "max-age=15552000; includeSubDomains"
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
     header X-Content-Type-Options nosniff
     header -X-Frame-Options
     header Content-Security-Policy "frame-ancestors https://$NC_DOMAIN"
+    # Rev.13: only the origin leaves the site - the SSO link carries a token in ?t=.
+    header Referrer-Policy strict-origin-when-cross-origin
     # Rev.13: every dot file (.env, .git, .user.ini) instead of a growing hand list;
     # /userscript/ stays reachable - the "install userscript" button links to it.
     @verborgen path /inc/* /bookmarklets/*
@@ -3168,7 +3196,7 @@ $dom {
     import protokoll ${dom%%.*}
     root * $dir
     encode zstd gzip
-    header Strict-Transport-Security "max-age=15552000; includeSubDomains"
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
     header X-Content-Type-Options nosniff
     # Rev.13: headers for static pages (Mozilla Observatory); file_server does not hide
     # dot files on its own, so .git, .env and the like are answered with 404.
@@ -3531,6 +3559,12 @@ EOF
     cat > "$CADDY_CONFD/40-office.caddy" <<EOF
 $EO_DOMAIN {
     import protokoll office
+    # Rev.13: Observatory rated office C (no header at all). The editor runs in an iframe
+    # of Nextcloud and nests its own frames, hence frame-ancestors with both origins.
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    header X-Content-Type-Options nosniff
+    header Referrer-Policy strict-origin-when-cross-origin
+    header Content-Security-Policy "frame-ancestors 'self' https://$NC_DOMAIN"
     reverse_proxy 127.0.0.1:$EO_PORT
 }
 EOF
