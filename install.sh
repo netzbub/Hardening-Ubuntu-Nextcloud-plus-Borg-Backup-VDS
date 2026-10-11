@@ -20,7 +20,7 @@
 #          - HOSTNAME_FQDN as an optional config var.
 #          - sysctl secure_redirects + ufw-sysctl log_martians fix; modprobe usb-storage+blacklist.
 #          - PAM: full pwquality set, pwhistory=24, nullok removed, login.defs (UMASK 027/aging),
-#            profile.d TMOUT/umask, su restricted to the sudo group.
+#            profile.d TMOUT/umask, su restricted to the sudo group, pam_faillock 5/15 min.
 #          - fail2ban allowipv6=auto + ignoreip WG net; NC filter on the official 2FA regex.
 #          - auditd: mkdir fix BEFORE augenrules (fixes ordering bug), L2 rule set (~47),
 #            auditd.conf availability-friendly (ROTATE/EMAIL instead of SUSPEND).
@@ -1450,6 +1450,47 @@ BANNEREOF
         sed -i -E '0,/^[#[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so.*/s//auth       required   pam_wheel.so use_uid group=wheel/' /etc/pam.d/su
     else
         warn "$ADMIN_USER not in the sudo group - su restriction NOT applied (lock-out protection)."
+    fi
+
+    # Rev.13 (usg/CIS 2026-10-11, pam_faillock): lock an account for 15 min after 5 failed
+    # passwords within 15 min. Hits console (VNC) and sudo only - SSH is key-only and never
+    # runs the auth stack. root is NOT locked (no even_deny_root), so root on the VNC
+    # console stays the way back in. Ubuntu ships no pam-auth-update profile for faillock;
+    # the lines go in with sed like pwhistory above. pam_unix must then skip TWO lines on
+    # success (authfail and pam_deny), otherwise every correct password lands on pam_deny.
+    install -d -m 700 /var/log/faillock
+    cat > /etc/security/faillock.conf <<'EOF'
+dir = /var/log/faillock
+audit
+deny = 5
+fail_interval = 900
+unlock_time = 900
+EOF
+    chmod 644 /etc/security/faillock.conf
+    if ! grep -q 'pam_faillock.so' /etc/pam.d/common-auth; then
+        backup_file /etc/pam.d/common-auth
+        local pam_auth_prev; pam_auth_prev=$(cat /etc/pam.d/common-auth)
+        sed -i -E '0,/^auth[[:space:]]+\[success=1 default=ignore\][[:space:]]+pam_unix\.so(.*)$/s//auth\trequisite\t\t\tpam_faillock.so preauth\nauth\t[success=2 default=ignore]\tpam_unix.so\1\nauth\t[default=die]\t\t\tpam_faillock.so authfail/' /etc/pam.d/common-auth
+        if [[ "$(grep -c pam_faillock.so /etc/pam.d/common-auth)" != 2 ]] || ! grep -q 'success=2 default=ignore.*pam_unix' /etc/pam.d/common-auth; then
+            printf '%s\n' "$pam_auth_prev" > /etc/pam.d/common-auth
+            warn "common-auth has an unexpected layout - pam_faillock NOT applied, file restored."
+        fi
+    fi
+    if ! grep -q 'pam_faillock.so' /etc/pam.d/common-account; then
+        backup_file /etc/pam.d/common-account
+        sed -i '0,/^account/s//account\trequired\t\t\tpam_faillock.so\naccount/' /etc/pam.d/common-account
+    fi
+
+    # Rev.13 (VNC test 2026-10-11): the provider's noVNC sends raw key positions. With the
+    # console keymap on 'us' every special character typed on a German Mac keyboard came
+    # out wrong, which makes the VNC console - the only way in on a lock-out - unusable.
+    if [[ -f /etc/default/keyboard ]]; then
+        backup_file /etc/default/keyboard
+        sed -i -E 's/^XKBLAYOUT=.*/XKBLAYOUT="de"/; s/^XKBVARIANT=.*/XKBVARIANT="mac"/' /etc/default/keyboard
+        grep -q '^XKBLAYOUT=' /etc/default/keyboard  || echo 'XKBLAYOUT="de"'  >> /etc/default/keyboard
+        grep -q '^XKBVARIANT=' /etc/default/keyboard || echo 'XKBVARIANT="mac"' >> /etc/default/keyboard
+        setupcon --force --save-only >/dev/null 2>&1 || true
+        setupcon -k --force >/dev/null 2>&1 || true
     fi
 
     log "Phase 5 done. Boot parameters + fstab take effect after reboot (plan it at the end)."
@@ -3685,6 +3726,8 @@ verify() {
     chk "sysctl: secure_redirects=0"       "sysctl -n net.ipv4.conf.all.secure_redirects | grep -qx 0"
     chk "PAM: pwquality minlen=14"         "grep -qE '^minlen = 14' /etc/security/pwquality.conf"
     chk "PAM: pwhistory remember=24"       "grep -q 'remember=24' /etc/pam.d/common-password"
+    chk "PAM: faillock deny=5"             "grep -qE '^deny = 5' /etc/security/faillock.conf && grep -q 'success=2 default=ignore.*pam_unix' /etc/pam.d/common-auth && grep -q pam_faillock.so /etc/pam.d/common-account"
+    chk "Console keymap de/mac (VNC)"      "grep -qx 'XKBLAYOUT=\"de\"' /etc/default/keyboard && grep -qx 'XKBVARIANT=\"mac\"' /etc/default/keyboard"
     chk "login.defs UMASK 027"             "grep -qE '^UMASK[[:space:]]+027' /etc/login.defs"
     chk "fail2ban ignores WG net"          "grep -q '$WG_NET.0/24' /etc/fail2ban/jail.d/00-ignoreip.local"
     chk "NC-2FA-Filter (Two-factor)"       "grep -q 'Two-factor' /etc/fail2ban/filter.d/nextcloud.conf"
