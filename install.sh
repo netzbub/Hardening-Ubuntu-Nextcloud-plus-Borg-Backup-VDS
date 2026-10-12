@@ -1556,6 +1556,13 @@ EOF
         setupcon --force --save-only >/dev/null 2>&1 || true
         setupcon -k --force >/dev/null 2>&1 || true
     fi
+    # VNC test 2026-10-12: pasting through noVNC sends each character as its US key position,
+    # so the de/mac console turns 'yz-#/' into 'zyß§-'. No keymap serves typing and
+    # pasting at once; vnc-us switches the console to US before a paste, vnc-de switches back.
+    # No kbd keymap files are installed, hence ckbcomp instead of 'loadkeys us'.
+    printf '#!/bin/sh\n# console keymap US for pasting via noVNC; back with vnc-de\nckbcomp us | loadkeys\n' > /usr/local/sbin/vnc-us
+    printf '#!/bin/sh\n# console keymap back to de/mac (/etc/default/keyboard)\nsetupcon -k --force\n' > /usr/local/sbin/vnc-de
+    chmod 755 /usr/local/sbin/vnc-us /usr/local/sbin/vnc-de
 
     log "Phase 5 done. Boot parameters + fstab take effect after reboot (plan it at the end)."
 }
@@ -4052,6 +4059,7 @@ verify() {
     chk "PAM: pwhistory remember=24"       "grep -q 'remember=24' /etc/pam.d/common-password"
     chk "PAM: faillock deny=5"             "grep -qE '^deny = 5' /etc/security/faillock.conf && grep -q 'success=2 default=ignore.*pam_unix' /etc/pam.d/common-auth && grep -q pam_faillock.so /etc/pam.d/common-account"
     chk "Console keymap de/mac (VNC)"      "grep -qx 'XKBLAYOUT=\"de\"' /etc/default/keyboard && grep -qx 'XKBVARIANT=\"mac\"' /etc/default/keyboard"
+    chk "Console keymap switch vnc-us/vnc-de" "test -x /usr/local/sbin/vnc-us && test -x /usr/local/sbin/vnc-de"
     chk "login.defs UMASK 027"             "grep -qE '^UMASK[[:space:]]+027' /etc/login.defs"
     chk "fail2ban ignores WG net"          "grep -q '$WG_NET.0/24' /etc/fail2ban/jail.d/00-ignoreip.local"
     chk "fail2ban ignores own addresses"   "for x in \$(ip -o addr show dev \$(ip route show default | awk '{print \$5; exit}') scope global | awk '{print \$4}' | cut -d/ -f1); do grep -qw -- \"\$x\" /etc/fail2ban/jail.d/00-ignoreip.local || exit 1; done"
