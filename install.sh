@@ -648,12 +648,22 @@ dns_gate() {  # dns_gate <domain> - abort unless the record points at THIS serve
     # Rev.12: '|| true' - under pipefail a name that does not resolve ended the script
     # silently (getent rc 2) before the message below was reached.
     pub4="$(ip -4 -o addr show dev "$wif" scope global | awk '{print $4}' | cut -d/ -f1 | head -1 || true)"
-    dns4="$(getent ahostsv4 "$dom" 2>/dev/null | awk '{print $1; exit}' || true)"
+    # Rev.13 FIX: getent reads /etc/hosts first - for the server's own hostname it
+    # returned 127.0.1.1 and the gate failed (fritz-ip on silo.brill.ing, 2026-10-12).
+    # Ask a public resolver directly when dig is there; getent stays the fallback.
+    if command -v dig >/dev/null 2>&1; then
+        q4() { dig +short +time=5 +tries=2 A "$1" "@${DNS_CHECK_SERVER:-1.1.1.1}" 2>/dev/null | grep -E '^[0-9.]+$' | head -1 || true; }
+        q6() { dig +short +time=5 +tries=2 AAAA "$1" "@${DNS_CHECK_SERVER:-1.1.1.1}" 2>/dev/null | grep -E '^[0-9a-f:]+$' | head -1 || true; }
+    else
+        q4() { getent ahostsv4 "$1" 2>/dev/null | awk '{print $1; exit}' || true; }
+        q6() { getent ahostsv6 "$1" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}' || true; }
+    fi
+    dns4="$(q4 "$dom")"
     [[ -n "$dns4" ]] || die "DNS gate: $dom does not resolve. Set the A record to $pub4, wait for the TTL, then run the phase again."
     [[ "$dns4" == "$pub4" ]] || die "DNS gate: $dom -> $dns4, but this server is $pub4. Fix the A record, then run the phase again."
     # AAAA: only check a real v6 entry (::ffff: = mapped v4). An AAAA that does NOT
     # point here also makes ACME fail.
-    dns6="$(getent ahostsv6 "$dom" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}' || true)"
+    dns6="$(q6 "$dom")"
     # Rev.13 FIX: 'grep -F' matched substrings - an AAAA of 2a0f:9400:6102:42::a also
     # "belonged" to a server holding 2a0f:9400:6102:42::ab. Now whole addresses only.
     if [[ -n "$dns6" ]]; then
@@ -3369,8 +3379,9 @@ setup_fritz_ip() {  # office line report: FRITZ!Box DynDNS -> Caddy -> fail2ban 
     local pwf="$SECRETS_IN_DIR/fritz-ip" hashf=/etc/caddy/fritz-ip.hash hash dir
     if [[ -s "$pwf" ]]; then
         # hash-password reads the password from stdin when no tty is attached - it never
-        # appears in the process list.
-        hash="$(tr -d '\n' < "$pwf" | caddy hash-password 2>/dev/null || true)"
+        # appears in the process list. FIX (silo 2026-10-12): it reads up to the line end
+        # and fails with "EOF" without one, so the newline must stay.
+        hash="$(printf '%s\n' "$(head -1 "$pwf")" | caddy hash-password 2>/dev/null || true)"
         [[ "$hash" == \$2* ]] || die "fritz-ip: caddy hash-password failed."
         install -m 640 -o root -g caddy /dev/null "$hashf"
         printf '%s\n' "$hash" > "$hashf"
@@ -3531,6 +3542,10 @@ EOF
 [Unit]
 Description=fail2ban exemption from the office router report
 OnFailure=fail-mail@%n.service
+# FIX (silo 2026-10-12): every line Caddy writes triggers the path unit; a burst of
+# requests hit the default start limit (5 in 10 s), failed the path unit and sent a
+# failure mail. The run is idempotent and cheap, so no start limit.
+StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 Environment=FRITZ_IP_LOG=/var/log/caddy/fritz-ip.log FRITZ_IP_MAX_DAYS=$FRITZ_IP_MAX_DAYS
@@ -3561,6 +3576,7 @@ EOF
     write_f2b_ignoreip
     caddy_apply
     touch /var/log/caddy/fritz-ip.log && caddy_log_owner
+    systemctl reset-failed fritz-ip.service fritz-ip.path 2>/dev/null || true
     systemctl enable --now fritz-ip.path fritz-ip.timer
     systemctl start fritz-ip.service
     log "fritz-ip done. FRITZ!Box: Internet > Permit Access > DynDNS, update URL:"
