@@ -51,6 +51,10 @@ SMTP_FROM="admin@example.com"
 # SHELL_TMOUT="900"                  # idle logout of interactive shells, seconds
 # SSH_TCP_FORWARDING="no"            # "yes" only if SSH tunnels are really used
 # F2B_IGNOREIP=""                    # networks fail2ban never bans, e.g. a fixed office IPv6 /64
+# FRITZ_IP_DOMAIN=""                 # e.g. server.example.com: the office FRITZ!Box reports its addresses
+#                                    # there (DynDNS), fail2ban exempts them; password in $SECRETS_IN_DIR/fritz-ip
+# FRITZ_IP_USER="fritz"
+# FRITZ_IP_MAX_DAYS="90"             # drop a report older than this
 # KEEP_SNAPD="no"                    # "yes" keeps snapd for Canonical Livepatch (Ubuntu Pro)
 # BORG_TIMER="*-*-* 05:00:00"        # daily server backup
 

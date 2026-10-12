@@ -5,6 +5,10 @@ All notable changes to this project are documented here. Versions follow a SemVe
 ## [Unreleased] - Rev. 13, in progress
 
 ### Added
+- **Office line report** (`FRITZ_IP_DOMAIN`, 2026-10-12): the office FRITZ!Box reports its IPv4 address and home network prefix via its DynDNS custom update URL to `https://$FRITZ_IP_DOMAIN/ip-melden` (Caddy, basic auth, password stored only as bcrypt hash). `/usr/local/sbin/fritz-ip` (triggered by `fritz-ip.path`, daily `fritz-ip.timer` 05:20) accepts a report only if the request came from one of the reported addresses, prefix length 48-64; a new report replaces the old one, a report older than `FRITZ_IP_MAX_DAYS` (90) is dropped; fail2ban is reloaded only on a change. Generic failure-mail template `fail-mail@.service`. New commands `fritz-ip` and `f2b-ignore`. Four `verify` checks.
+- **fail2ban exempts the server's own addresses** (WAN interface), so jobs reaching the own Nextcloud over the public address cannot ban the server. One composer writes `00-ignoreip.local` from `/etc/fail2ban/ignoreip.static` and the office report.
+- **Caddy admin API on a unix socket** (`/run/caddy/admin.sock`, `RuntimeDirectory=caddy`) instead of unauthenticated `127.0.0.1:2019`; `caddy-base` now also rewrites the sandbox drop-in and restarts Caddy.
+- **FIXED: `dns_gate` compared IPv6 addresses as substrings** (`grep -F`); now whole addresses only.
 - **Phase 17: ClamAV for Nextcloud uploads** (`ENABLE_CLAMAV`): clamd on the host, its socket mounted read-only into the Nextcloud app and cron containers, app `files_antivirus` in socket mode, infected action configurable (`AV_INFECTED_ACTION`, default `only_log`).
 - **Admin password reminder** instead of expiry: `chage -M -1`, a daily timer mails the alarm address from `ADMIN_PW_REMIND_DAYS` (default 182) after the last change until the password is changed. No lock-out.
 - **Second mail sender** `SMTP_ALARM_FROM` with its own password file; input secrets are read from `SECRETS_IN_DIR` files, never sourced.

@@ -314,6 +314,12 @@ SHELL_TMOUT="${SHELL_TMOUT:-900}"
 SSH_TCP_FORWARDING="${SSH_TCP_FORWARDING:-no}"   # Rev.13: yes only if SSH tunnels are really used
 # Rev.13: extra networks fail2ban never bans (space separated), e.g. a fixed office prefix.
 F2B_IGNOREIP="${F2B_IGNOREIP:-}"
+# Rev.13: the office router (FRITZ!Box DynDNS, custom update URL) reports its addresses
+# to https://$FRITZ_IP_DOMAIN/ip-melden; fail2ban then never bans the office line.
+# Empty = off. Password from $SECRETS_IN_DIR/fritz-ip, kept only as a bcrypt hash.
+FRITZ_IP_DOMAIN="${FRITZ_IP_DOMAIN:-}"
+FRITZ_IP_USER="${FRITZ_IP_USER:-fritz}"
+FRITZ_IP_MAX_DAYS="${FRITZ_IP_MAX_DAYS:-90}"   # a report older than this is dropped
 
 # --- HDD / Borg backup on the server HDD (phase 9+10) ---
 HDD_MOUNT="${HDD_MOUNT:-/srv/hdd}"         # 4 TB HDD mount point
@@ -511,11 +517,18 @@ write_caddy_base() {
     # block starts with 'import protokoll <name>'. Caddy rolls the files itself;
     # its own error log stays in the journal (journalctl -u caddy).
     install -d -o caddy -g caddy -m 750 /var/log/caddy
+    # Rev.13: the admin API listened on 127.0.0.1:2019 without authentication - any local
+    # process (every container user, every service account) could replace the whole
+    # web server config. A unix socket in Caddy's RuntimeDirectory is reachable for
+    # root and user caddy only; 'systemctl reload caddy' takes the address from this file.
     cat > /etc/caddy/Caddyfile <<EOF
 # Managed by install.sh - do not edit by hand.
 # One file per site in $CADDY_CONFD (phases 9, 13, 14).
 # Access log per site as JSON, rotated by Caddy itself, kept 30 days.
 # Caddy's own error log stays in the journal: journalctl -u caddy
+{
+    admin unix//run/caddy/admin.sock
+}
 (protokoll) {
     log {
         output file /var/log/caddy/{args[0]}.log {
@@ -547,6 +560,37 @@ write_caddy_base() {
 import $CADDY_CONFD/*.caddy
 EOF
     chmod 644 /etc/caddy/Caddyfile          # must be readable by user 'caddy' (Review K3)
+}
+
+write_caddy_dropin() {
+    # Rev.5 (B6): lock Caddy into a systemd sandbox (markedly lowers the Lynis exposure).
+    # CAP_NET_BIND_SERVICE for 80/443; ReadWritePaths only the cert/state directory
+    # and, since Rev.13, the access logs (without it the reload fails: read-only file system).
+    install -d /etc/systemd/system/caddy.service.d
+    cat > /etc/systemd/system/caddy.service.d/hardening.conf <<'EOF'
+[Service]
+ProtectSystem=strict
+ReadWritePaths=/var/lib/caddy /var/log/caddy
+# Rev.13: /run/caddy for the admin socket (ProtectSystem=strict makes /run read-only)
+RuntimeDirectory=caddy
+RuntimeDirectoryMode=0750
+ProtectHome=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+EOF
 }
 
 caddy_log_owner() {
@@ -610,8 +654,10 @@ dns_gate() {  # dns_gate <domain> - abort unless the record points at THIS serve
     # AAAA: only check a real v6 entry (::ffff: = mapped v4). An AAAA that does NOT
     # point here also makes ACME fail.
     dns6="$(getent ahostsv6 "$dom" 2>/dev/null | awk '$1 !~ /^::ffff:/ {print $1; exit}' || true)"
+    # Rev.13 FIX: 'grep -F' matched substrings - an AAAA of 2a0f:9400:6102:42::a also
+    # "belonged" to a server holding 2a0f:9400:6102:42::ab. Now whole addresses only.
     if [[ -n "$dns6" ]]; then
-        ip -6 -o addr show scope global | grep -qF "$dns6" \
+        ip -6 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | grep -qxF "$dns6" \
             || die "DNS gate: AAAA($dom)=$dns6 does not belong to this server. Fix or delete the AAAA, then run the phase again."
     fi
     log "DNS gate passed: $dom -> $dns4${dns6:+ / $dns6}"
@@ -1505,6 +1551,25 @@ EOF
 }
 
 # ============================ PHASE 6: FAIL2BAN ==============================
+write_f2b_ignoreip() {  # fail2ban exemptions: loopback, WG net, own addresses, F2B_IGNOREIP, office report
+    # Rev.13: the static part goes to /etc/fail2ban/ignoreip.static; fritz-ip (if set up)
+    # appends the reported office addresses. Two files with 'ignoreip' in [DEFAULT]
+    # would not add up - the later one replaces the earlier - so one writer composes
+    # 00-ignoreip.local from both parts.
+    # Own addresses: davsync and other jobs on this server reach next.brill.ing over the
+    # public address, so a failed login there would ban the server itself.
+    local wif own
+    wif="${WAN_IF:-$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')}"
+    own="$(ip -o addr show dev "$wif" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ' || true)"
+    install -d /etc/fail2ban/jail.d
+    printf '127.0.0.1/8 ::1 %s.0/24 %s %s\n' "$WG_NET" "$own" "$F2B_IGNOREIP" | tr -s ' ' > /etc/fail2ban/ignoreip.static
+    if [[ -x /usr/local/sbin/fritz-ip ]]; then
+        /usr/local/sbin/fritz-ip --compose || die "fritz-ip --compose failed."
+    else
+        printf '[DEFAULT]\nignoreip = %s\n' "$(< /etc/fail2ban/ignoreip.static)" > /etc/fail2ban/jail.d/00-ignoreip.local
+    fi
+}
+
 phase6() {
     require_root
     log "Phase 6: fail2ban"
@@ -1516,7 +1581,7 @@ phase6() {
     # Rev.13: F2B_IGNOREIP takes further trusted networks, e.g. the fixed IPv6 prefix of the
     # office line. On 2026-10-01 and -03 the nextcloud jail banned the owner's own office
     # address - and IPv6 bans hit the whole /64, i.e. every device in the office.
-    printf '[DEFAULT]\nignoreip = 127.0.0.1/8 ::1 %s.0/24 %s\n' "$WG_NET" "$F2B_IGNOREIP" > /etc/fail2ban/jail.d/00-ignoreip.local
+    write_f2b_ignoreip
 
     # Council-Fix 7: fail2ban bans IPv6 only as /128 - but an attacker usually has
     # a whole /64 and simply rotates the address. Extra action:
@@ -1926,31 +1991,7 @@ EOF
     # === Council-Fix 8: DNS gate BEFORE Caddy start (Rev.10: extracted to dns_gate) ===
     dns_gate "$NC_DOMAIN"
 
-    # Rev.5 (B6): lock Caddy into a systemd sandbox (markedly lowers the Lynis exposure).
-    # CAP_NET_BIND_SERVICE for 80/443; ReadWritePaths only the cert/state directory
-    # and, since Rev.13, the access logs (without it the reload fails: read-only file system).
-    install -d /etc/systemd/system/caddy.service.d
-    cat > /etc/systemd/system/caddy.service.d/hardening.conf <<'EOF'
-[Service]
-ProtectSystem=strict
-ReadWritePaths=/var/lib/caddy /var/log/caddy
-ProtectHome=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-RestrictNamespaces=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-LockPersonality=true
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-SystemCallArchitectures=native
-SystemCallFilter=@system-service
-EOF
+    write_caddy_dropin
     systemctl daemon-reload
 
     systemctl enable --now caddy
@@ -3315,6 +3356,217 @@ EOF
     log "Phase 14 done."
 }
 
+setup_fritz_ip() {  # office line report: FRITZ!Box DynDNS -> Caddy -> fail2ban exemption
+    require_root
+    if [[ -z "$FRITZ_IP_DOMAIN" ]]; then
+        log "fritz-ip skipped (FRITZ_IP_DOMAIN empty)."
+        return 0
+    fi
+    log "fritz-ip: office line report via https://$FRITZ_IP_DOMAIN/ip-melden"
+    # The office prefix is assigned dynamically; a fixed F2B_IGNOREIP entry goes stale
+    # (owner's question 2026-10-12). The router reports itself on every reconnect.
+    dns_gate "$FRITZ_IP_DOMAIN"
+    local pwf="$SECRETS_IN_DIR/fritz-ip" hashf=/etc/caddy/fritz-ip.hash hash dir
+    if [[ -s "$pwf" ]]; then
+        # hash-password reads the password from stdin when no tty is attached - it never
+        # appears in the process list.
+        hash="$(tr -d '\n' < "$pwf" | caddy hash-password 2>/dev/null || true)"
+        [[ "$hash" == \$2* ]] || die "fritz-ip: caddy hash-password failed."
+        install -m 640 -o root -g caddy /dev/null "$hashf"
+        printf '%s\n' "$hash" > "$hashf"
+        log "fritz-ip: new password hash from $pwf (delete that file now)."
+    fi
+    [[ -s "$hashf" ]] || die "fritz-ip: no password - put it into $pwf (one line, root 600)."
+    hash="$(< "$hashf")"
+    # basic_auth is the directive name from Caddy 2.8 on; older versions know basicauth.
+    dir=basic_auth
+    caddy version 2>/dev/null | grep -qE '^v2\.[0-7]\.' && dir=basicauth
+
+    install -d -m 750 /var/lib/fritz-ip
+    cat > /usr/local/sbin/fritz-ip <<'EOF'
+#!/usr/bin/python3
+"""fritz-ip - fail2ban exemption for the office line, reported by its FRITZ!Box.
+
+Reads the Caddy access log of the report site, takes the newest report that passed
+basic auth (status 200) and accepts it only if the request itself came from one of
+the reported addresses - knowing the password alone does not let anyone exempt a
+foreign network. Exempted are the IPv4 address and the home network prefix
+(<ip6lanprefix>, 48 to 64 bits). A new report replaces the old one; a report older
+than FRITZ_IP_MAX_DAYS is dropped. fail2ban is reloaded only on a change.
+--compose only rebuilds 00-ignoreip.local (called by install.sh).
+"""
+import ipaddress, json, os, subprocess, sys, time, urllib.parse
+
+LOG = os.environ.get("FRITZ_IP_LOG", "/var/log/caddy/fritz-ip.log")
+MAXDAYS = int(os.environ.get("FRITZ_IP_MAX_DAYS", "90"))
+STATE = "/var/lib/fritz-ip/stand.json"
+STATIC = "/etc/fail2ban/ignoreip.static"
+OUT = "/etc/fail2ban/jail.d/00-ignoreip.local"
+
+
+def addr(s, v):
+    try:
+        a = ipaddress.ip_address(s)
+    except ValueError:
+        return None
+    return a if a.version == v and a.is_global else None
+
+
+def report(j):
+    if j.get("status") != 200:
+        return None
+    req = j.get("request", {})
+    u = urllib.parse.urlsplit(req.get("uri", ""))
+    if u.path != "/ip-melden":
+        return None
+    q = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
+    v4 = addr(q.get("ip", ""), 4)
+    v6 = addr(q.get("ip6", ""), 6)
+    pfx = None
+    try:
+        n = ipaddress.ip_network(q.get("pfx", ""), strict=False)
+        if n.version == 6 and 48 <= n.prefixlen <= 64 and n.network_address.is_global:
+            pfx = n
+    except ValueError:
+        pass
+    c = req.get("client_ip") or req.get("remote_ip", "")
+    client = addr(c, 4) or addr(c, 6)
+    if client is None or client not in (v4, v6):
+        return None
+    if v4 is None and pfx is None:
+        return None
+    return {"ts": j.get("ts", 0), "v4": str(v4) if v4 else "", "pfx": str(pfx) if pfx else ""}
+
+
+def compose(st):
+    static = open(STATIC).read().strip() if os.path.exists(STATIC) else "127.0.0.1/8 ::1"
+    dyn = " ".join(x for x in (st.get("v4", ""), st.get("pfx", "")) if x)
+    text = "[DEFAULT]\n# static part: %s, office line: fritz-ip\nignoreip = %s\n" % (STATIC, " ".join(x for x in (static, dyn) if x))
+    old = open(OUT).read() if os.path.exists(OUT) else ""
+    if text == old:
+        return False
+    tmp = OUT + ".tmp"
+    with open(tmp, "w") as h:
+        h.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, OUT)
+    return True
+
+
+def main():
+    st = {}
+    if os.path.exists(STATE):
+        st = json.load(open(STATE))
+    if sys.argv[1:] == ["--compose"]:
+        compose(st)
+        return
+    new = None
+    if os.path.exists(LOG):
+        for line in open(LOG, errors="replace"):
+            try:
+                r = report(json.loads(line))
+            except (ValueError, AttributeError):
+                continue
+            if r and (new is None or r["ts"] >= new["ts"]):
+                new = r
+    old = dict(st)
+    if new and new["ts"] > st.get("ts", 0):
+        st = new
+    if st and time.time() - st.get("ts", 0) > MAXDAYS * 86400:
+        print("fritz-ip: report from %s older than %d days - dropped" % (time.strftime("%d.%m.%Y", time.localtime(st["ts"])), MAXDAYS))
+        st = {}
+    if st != old:
+        tmp = STATE + ".tmp"
+        with open(tmp, "w") as h:
+            json.dump(st, h)
+        os.replace(tmp, STATE)
+        if st:
+            print("fritz-ip: office line now v4=%s v6=%s (was v4=%s v6=%s)" % (st["v4"] or "-", st["pfx"] or "-", old.get("v4") or "-", old.get("pfx") or "-"))
+    if compose(st):
+        subprocess.run(["fail2ban-client", "reload"], check=True, stdout=subprocess.DEVNULL)
+        # bans placed before the exemption stay active; lift them for the new addresses
+        if st.get("v4"):
+            subprocess.run(["fail2ban-client", "unban", st["v4"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if st.get("pfx", "").endswith("/64"):
+            subprocess.run(["ipset", "-exist", "del", "f2b-v6prefix", st["pfx"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("fritz-ip: fail2ban reloaded")
+
+
+if __name__ == "__main__":
+    main()
+EOF
+    chmod 700 /usr/local/sbin/fritz-ip
+
+    # Only /ip-melden answers; everything else is 404. The log has no credentials:
+    # Caddy redacts the Authorization header unless log_credentials is set.
+    cat > "$CADDY_CONFD/05-fritz-ip.caddy" <<EOF
+$FRITZ_IP_DOMAIN {
+    import protokoll fritz-ip
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    @melden path /ip-melden
+    handle @melden {
+        $dir {
+            $FRITZ_IP_USER $hash
+        }
+        respond "ok" 200
+    }
+    handle {
+        respond 404
+    }
+}
+EOF
+    chown root:caddy "$CADDY_CONFD/05-fritz-ip.caddy"
+    chmod 640 "$CADDY_CONFD/05-fritz-ip.caddy"
+
+    # Generic failure mail for units outside immo.flow (OnFailure=fail-mail@%n.service).
+    local to="${SMTP_ALARM_FROM:-$ADMIN_MAIL}"
+    cat > /etc/systemd/system/fail-mail@.service <<EOF
+[Unit]
+Description=Failure mail for %i to $to
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'a=default; grep -q "^account alarm" /etc/msmtprc && a=alarm; { printf "To: $to\\nSubject: FEHLER %i auf %H\\n\\n"; journalctl -u %i -n 50 --no-pager; } | /usr/bin/msmtp -a \$\$a $to'
+EOF
+    cat > /etc/systemd/system/fritz-ip.service <<EOF
+[Unit]
+Description=fail2ban exemption from the office router report
+OnFailure=fail-mail@%n.service
+[Service]
+Type=oneshot
+Environment=FRITZ_IP_LOG=/var/log/caddy/fritz-ip.log FRITZ_IP_MAX_DAYS=$FRITZ_IP_MAX_DAYS
+ExecStart=/usr/local/sbin/fritz-ip
+EOF
+    # PathModified, not PathChanged: Caddy keeps the log open, so there is no close-write.
+    cat > /etc/systemd/system/fritz-ip.path <<'EOF'
+[Unit]
+Description=Office router report arrived
+[Path]
+PathModified=/var/log/caddy/fritz-ip.log
+Unit=fritz-ip.service
+[Install]
+WantedBy=paths.target
+EOF
+    # Daily run so an old report also expires without a new one (owner: routines from 05:00).
+    cat > /etc/systemd/system/fritz-ip.timer <<'EOF'
+[Unit]
+Description=Daily expiry check of the office router report
+[Timer]
+OnCalendar=*-*-* 05:20:00
+[Install]
+WantedBy=timers.target
+EOF
+    chmod 644 /etc/systemd/system/fail-mail@.service /etc/systemd/system/fritz-ip.service \
+        /etc/systemd/system/fritz-ip.path /etc/systemd/system/fritz-ip.timer
+    systemctl daemon-reload
+    write_f2b_ignoreip
+    caddy_apply
+    touch /var/log/caddy/fritz-ip.log && caddy_log_owner
+    systemctl enable --now fritz-ip.path fritz-ip.timer
+    systemctl start fritz-ip.service
+    log "fritz-ip done. FRITZ!Box: Internet > Permit Access > DynDNS, update URL:"
+    log "  https://<username>:<pass>@$FRITZ_IP_DOMAIN/ip-melden?ip=<ipaddr>&ip6=<ip6addr>&pfx=<ip6lanprefix>"
+}
+
 phase15() {
     require_root
     if [[ "$ENABLE_TALK_HPB" != "yes" ]]; then
@@ -3786,6 +4038,12 @@ verify() {
     chk "Console keymap de/mac (VNC)"      "grep -qx 'XKBLAYOUT=\"de\"' /etc/default/keyboard && grep -qx 'XKBVARIANT=\"mac\"' /etc/default/keyboard"
     chk "login.defs UMASK 027"             "grep -qE '^UMASK[[:space:]]+027' /etc/login.defs"
     chk "fail2ban ignores WG net"          "grep -q '$WG_NET.0/24' /etc/fail2ban/jail.d/00-ignoreip.local"
+    chk "fail2ban ignores own addresses"   "for x in \$(ip -o addr show dev \$(ip route show default | awk '{print \$5; exit}') scope global | awk '{print \$4}' | cut -d/ -f1); do grep -qw -- \"\$x\" /etc/fail2ban/jail.d/00-ignoreip.local || exit 1; done"
+    chk "Caddy admin on socket, not :2019" "test -S /run/caddy/admin.sock && ! ss -tln | grep -q ':2019 '"
+    if [[ -n "$FRITZ_IP_DOMAIN" ]]; then
+        chk "fritz-ip: path + timer active"  "systemctl is-active -q fritz-ip.path && systemctl is-active -q fritz-ip.timer"
+        chk "fritz-ip: site needs password"  "grep -qE 'basic_?auth' $CADDY_CONFD/05-fritz-ip.caddy"
+    fi
     chk "NC-2FA-Filter (Two-factor)"       "grep -q 'Two-factor' /etc/fail2ban/filter.d/nextcloud.conf"
     chk "Caddy-Sandbox-Drop-in"            "test -f /etc/systemd/system/caddy.service.d/hardening.conf"
     chk "ubuntu user removed"              "! id ubuntu"
@@ -3965,6 +4223,7 @@ usage() {
     echo "  phase15  Talk HPB  (ENABLE_TALK_HPB)        phase16  Euro-Office (ENABLE_OFFICE)"
     echo "  phase17  ClamAV for Nextcloud uploads (ENABLE_CLAMAV)"
     echo "Maintenance: caddy-base  (rebuild Caddyfile + Nextcloud site after an upgrade to Rev.10)"
+    echo "             f2b-ignore  (rewrite the fail2ban exemptions)   fritz-ip  (office line report, FRITZ_IP_DOMAIN)"
     echo "Meta: bootstrap (0-2, stops at the login test)  rest (3-11, 13-17, upgrade, 12 + verify + lynis)  all (everything with the stop)"
     echo "Audit: lynis (writes \$TESTS_DIR/30-lynis.log)"
 }
@@ -3985,8 +4244,22 @@ main() {
             # site files written by phases 13 and 14 are never loaded.
             require_root
             [[ -n "$NC_DOMAIN" ]] || die "caddy-base: NC_DOMAIN is empty."
-            write_caddy_base; write_caddy_nextcloud; caddy_apply
+            # Rev.13: also the sandbox drop-in (RuntimeDirectory for the admin socket); a
+            # changed drop-in and a moved admin address need a restart, not a reload.
+            write_caddy_dropin; write_caddy_base; write_caddy_nextcloud
+            caddy validate --config /etc/caddy/Caddyfile || die "Caddyfile invalid - nothing restarted."
+            caddy_log_owner
+            systemctl daemon-reload
+            systemctl restart caddy
             log "Caddy structure rebuilt: /etc/caddy/Caddyfile imports $CADDY_CONFD/*.caddy"
+            ;;
+        f2b-ignore)
+            # Rev.13: rewrite the fail2ban exemptions only (own addresses, F2B_IGNOREIP).
+            require_root; write_f2b_ignoreip; fail2ban-client reload >/dev/null
+            log "fail2ban exemptions: $(sed -n 's/^ignoreip = //p' /etc/fail2ban/jail.d/00-ignoreip.local)"
+            ;;
+        fritz-ip)
+            require_root; setup_fritz_ip
             ;;
         verify) verify || true ;;
         lynis) lynis_audit ;;
@@ -4006,7 +4279,7 @@ main() {
             # final upgrade - its own comment always demanded that; before, the baseline
             # knew nothing of MariaDB, PHP-FPM, coturn or the immo units.
             phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11
-            phase13; phase14; phase15; phase16; phase17
+            phase13; phase14; setup_fritz_ip; phase15; phase16; phase17
             apt-get update -q && apt-get full-upgrade -y -q
             phase12
             verify || true
@@ -4025,7 +4298,7 @@ main() {
             # Council-Fix 4 used to ask about the offline copy HERE, after phase2 - too
             # late to prevent a lock-out. password_gate above does it before phase2.
             phase3; phase4; phase5; phase6; phase7; phase8; phase9; phase10; phase11
-            phase13; phase14; phase15; phase16; phase17
+            phase13; phase14; setup_fritz_ip; phase15; phase16; phase17
             apt-get update -q && apt-get full-upgrade -y -q
             phase12          # Rev.13: last, see 'rest'
             verify || true   # one open point must not swallow the final notes (Review M7)
