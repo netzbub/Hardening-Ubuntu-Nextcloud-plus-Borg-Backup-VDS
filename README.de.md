@@ -102,10 +102,10 @@ Eine harte Projektregel, schmerzhaft gelernt: **Der Abgleich vom lokalen Rechner
 
 Die 4-TB-HDD ist in erster Linie ein **Off-site-Backup-Tresor für die lokalen (Mac-Studio-)Daten des Betreibers** — das ist ihr Hauptzweck (rund 90–95 % des Backup-Volumens). Die Sicherung des Servers selbst ist der kleinere, zweitrangige Teil. Zwei Borg-Repositories liegen auf der HDD unter `/srv/hdd/backup`:
 
-- **`repo-local`** (das Hauptrepo) — der lokale Rechner sichert hierher, über SSH mit einem eingeschränkten, **append-only**-Schlüssel, damit ein kompromittierter lokaler Rechner die vorhandenen Backups weder löschen noch verschlüsseln kann. Das ist die „weit-weg"-Zweitkopie der Mac-Daten.
+- **`repo-mac`** (das Hauptrepo) — der lokale Rechner sichert hierher, über SSH mit einem eingeschränkten, **append-only**-Schlüssel, damit ein kompromittierter lokaler Rechner die vorhandenen Backups weder löschen noch verschlüsseln kann. Das ist die „weit-weg"-Zweitkopie der Mac-Daten.
 - **`repo-server`** (das kleine Repo) — der Server sichert zusätzlich *sich selbst* (Nextcloud-Konfig, DB-Dump, `/etc`, `/home`, Systemzustand), damit der Host nach einem Totalverlust wieder aufgebaut werden kann. Passphrase vom Skript automatisch erzeugt.
 
-Backups laufen **event-getriggert, nicht nach Uhrzeit** (der Betreiber arbeitet nachts): Nach dem Push des lokalen Rechners legt dieser eine Trigger-Datei ab, eine systemd-Path-Unit stößt die Server-Selbstsicherung an, und ein wöchentlicher Timer ist das Auffangnetz. Bewusst **kein Zweitprovider / keine StorageBox**: Für die Mac-Daten *ist* der Server selbst die Off-site-Kopie (`repo-local`), und lokal existieren drei weitere Backups. Das akzeptierte Restrisiko (gleichzeitiger Verlust von Büro und Server) ist dokumentiert und bewusst getragen.
+Backups laufen **event-getriggert, nicht nach Uhrzeit** (der Betreiber arbeitet nachts): Nach dem Push des lokalen Rechners legt dieser eine Trigger-Datei ab, eine systemd-Path-Unit stößt die Server-Selbstsicherung an, und ein wöchentlicher Timer ist das Auffangnetz. Bewusst **kein Zweitprovider / keine StorageBox**: Für die Mac-Daten *ist* der Server selbst die Off-site-Kopie (`repo-mac`), und lokal existieren drei weitere Backups. Das akzeptierte Restrisiko (gleichzeitiger Verlust von Büro und Server) ist dokumentiert und bewusst getragen.
 
 **Speicher-Puffer auf dem Datenvolume.** Nextclouds Blobs und die Borg-Repositories teilen sich `$HDD_MOUNT`; ein ext4-Reserved-Blocks-Wert (`tune2fs -m 5`) hält die letzten 5 % für normale Schreibprozesse gesperrt, und ein zweimal täglicher Timer mailt eine Warnung bei 85 % und einen kritischen Alarm bei 95 %. Beides ist prozentual gegen das jeweils gemountete Gerät gerechnet — kein Code-Unterschied zwischen einem Übergangsvolume und der späteren 4-TB-HDD.
 
@@ -179,7 +179,7 @@ Nur das, was dieses Projekt aufsetzt und konfiguriert — nicht der Ubuntu-Stand
     ├── ncdata/                      # Nextcloud-Daten / Datei-Blobs (~1 TB)
     └── backup/
         ├── repo-server/             # Borg: Server-Selbstsicherung
-        ├── repo-local/              # Borg: lokaler Rechner → Server (append-only)
+        ├── repo-mac/              # Borg: lokaler Rechner → Server (append-only)
         └── trigger/                 # Event-Trigger fürs Server-Backup
 
 /etc/

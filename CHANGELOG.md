@@ -5,6 +5,7 @@ All notable changes to this project are documented here. Versions follow a SemVe
 ## [Unreleased] - Rev. 13, in progress
 
 ### Added
+- **Mac backup repository renamed `repo-local` -> `repo-mac`** (2026-10-13), so the name says whose backup it is. phase10 moves an existing `repo-local` and rewrites the forced command in the admin's `authorized_keys`. One `verify` check.
 - **Office line report** (`FRITZ_IP_DOMAIN`, 2026-10-12): the office FRITZ!Box reports its IPv4 address and home network prefix via its DynDNS custom update URL to `https://$FRITZ_IP_DOMAIN/ip-melden` (Caddy, basic auth, password stored only as bcrypt hash). `/usr/local/sbin/fritz-ip` (triggered by `fritz-ip.path`, daily `fritz-ip.timer` 05:20) accepts a report only if the request came from one of the reported addresses, prefix length 48-64; a new report replaces the old one, a report older than `FRITZ_IP_MAX_DAYS` (90) is dropped; fail2ban is reloaded only on a change. Generic failure-mail template `fail-mail@.service`. New commands `fritz-ip` and `f2b-ignore`. Four `verify` checks.
 - **fail2ban exempts the server's own addresses** (WAN interface), so jobs reaching the own Nextcloud over the public address cannot ban the server. One composer writes `00-ignoreip.local` from `/etc/fail2ban/ignoreip.static` and the office report.
 - **Caddy admin API on a unix socket** (`/run/caddy/admin.sock`, `RuntimeDirectory=caddy`) instead of unauthenticated `127.0.0.1:2019`; `caddy-base` now also rewrites the sandbox drop-in and restarts Caddy.

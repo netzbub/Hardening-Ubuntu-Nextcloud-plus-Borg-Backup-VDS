@@ -328,7 +328,7 @@ HDD_MOUNT="${HDD_MOUNT:-/srv/hdd}"         # 4 TB HDD mount point
 # client's key line missing, silo's only archive was three days old on 2026-10-09.
 BORG_TIMER="${BORG_TIMER:-*-*-* 05:00:00}"   # Rev.13: routines from 05:00 (owner decision 2026-10-09)
 NCDATA_DIR="${HDD_MOUNT}/ncdata"           # Nextcloud data dir (blobs, ~1 TB)
-BACKUP_DIR="${HDD_MOUNT}/backup"           # Borg repos: repo-server + repo-local
+BACKUP_DIR="${HDD_MOUNT}/backup"           # Borg repos: repo-server + repo-mac
 
 # --- General ---
 TIMEZONE="${TIMEZONE:-Europe/Berlin}"
@@ -2473,7 +2473,7 @@ phase10() {
     mountpoint -q "$HDD_MOUNT" || die "HDD not mounted at $HDD_MOUNT (setup: see the comment in phase 9)."
 
     # CRITICAL fix (Review K1/H3): 710 root:$ADMIN_USER - the admin user may TRAVERSE (x), not list (r).
-    # 700 root:root locked the admin user out -> trigger + repo-local were dead.
+    # 700 root:root locked the admin user out -> trigger + repo-mac were dead.
     install -d -m 710 -o root -g "$ADMIN_USER" "$BACKUP_DIR"
     gen_secret borg-passphrase >/dev/null
     install -m 600 "$SECRETS_DIR/borg-passphrase" /root/.borg-passphrase
@@ -2490,13 +2490,19 @@ phase10() {
         die "$BACKUP_DIR/repo-server exists but does not open with $SECRETS_DIR/borg-passphrase. Move it aside (mv $BACKUP_DIR/repo-server $BACKUP_DIR/repo-server.alt-\$(date +%y%m%d)) or put the OLD passphrase into $SECRETS_DIR/borg-passphrase, then run phase10 again."
     fi
     # Repo 2: the LOCAL machine backs up here (init from the local machine, command at the end):
-    install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$BACKUP_DIR/repo-local"
+    # 2026-10-13: renamed repo-local -> repo-mac so the name says whose backup it is;
+    # an existing repo-local on the data volume is moved, not left behind next to an empty new one.
+    if [[ -d "$BACKUP_DIR/repo-local" && ! -e "$BACKUP_DIR/repo-mac" ]]; then
+        mv "$BACKUP_DIR/repo-local" "$BACKUP_DIR/repo-mac"
+        sed -i 's#--restrict-to-repository '"$BACKUP_DIR"'/repo-local #--restrict-to-repository '"$BACKUP_DIR"'/repo-mac #' "/home/$ADMIN_USER/.ssh/authorized_keys" 2>/dev/null || true
+    fi
+    install -d -m 700 -o "$ADMIN_USER" -g "$ADMIN_USER" "$BACKUP_DIR/repo-mac"
     # Trigger dir: after its push the local machine triggers the server backup (event- not time-driven):
     install -d -m 770 -o root -g "$ADMIN_USER" "$BACKUP_DIR/trigger"
 
     # --- Backup key isolation (Review H4): the local machine does NOT use the admin key for backups ---
     # Two purpose-bound forced-command keys, whose authorized_keys lines are printed below.
-    # A stolen backup key can NEITHER open a shell NOR delete/encrypt repo-local
+    # A stolen backup key can NEITHER open a shell NOR delete/encrypt repo-mac
     # (append-only), and the trigger key can ONLY create the trigger file.
     log ""
     log "=== Run ONCE on the local machine and add the 2 public keys here ==="
@@ -2505,10 +2511,10 @@ phase10() {
     log "Then on the SERVER add to /home/${ADMIN_USER}/.ssh/authorized_keys (one line each):"
     # Rev.13: --restrict-to-repository (stricter than -path) and from= the WireGuard peer,
     # as running on silo since 2026-10-07; the client reaches the repo only through the tunnel.
-    log "  from=\"${WG_NET}.2\",command=\"borg serve --restrict-to-repository ${BACKUP_DIR}/repo-local --append-only\",restrict <public key of the client>"
+    log "  from=\"${WG_NET}.2\",command=\"borg serve --restrict-to-repository ${BACKUP_DIR}/repo-mac --append-only\",restrict <public key of the client>"
     log "  command=\"touch ${BACKUP_DIR}/trigger/.run-backup\",restrict,no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding <INHALT vps_trigger.pub>"
     log "The backup chain then uses:  borg ... -e 'ssh -i ~/.ssh/vps_borg'  &&  ssh -i ~/.ssh/vps_trigger vps"
-    log "Prune on repo-local runs ONLY manually from the local machine (the append-only key cannot prune) - use the admin key or a third full-access key."
+    log "Prune on repo-mac runs ONLY manually from the local machine (the append-only key cannot prune) - use the admin key or a third full-access key."
     log "========================================================================="
 
     cat > /usr/local/bin/backup-server.sh <<EOF
@@ -2621,7 +2627,7 @@ EOF
     systemctl enable --now borg-backup.path borg-backup.timer
 
     log "Initialise the repo for the LOCAL machine once (from the local machine):"
-    log "  borg init --encryption=repokey-blake2 ssh://${ADMIN_USER}@${WG_NET}.1:${SSH_PORT}${BACKUP_DIR}/repo-local"
+    log "  borg init --encryption=repokey-blake2 ssh://${ADMIN_USER}@${WG_NET}.1:${SSH_PORT}${BACKUP_DIR}/repo-mac"
     log "Backup chain afterwards:  borg create ... && ssh vps 'touch ${BACKUP_DIR}/trigger/.run-backup'"
     log "Phase 10 done. Do not forget the restore test (borg mount + spot check)!"
 }
@@ -4162,6 +4168,7 @@ verify() {
     chk "sshd: no ECDSA host key offered"  "! sshd -T | grep -qi '^hostkey .*ecdsa'"
     chk "sshd: PQ key exchange first"      "sshd -T | grep -q '^kexalgorithms sntrup761x25519'"
     chk "Borg: archive younger than 2 days" "BORG_PASSCOMMAND='cat /root/.borg-passphrase' borg list --json --last 1 $BACKUP_DIR/repo-server 2>/dev/null | python3 -c 'import sys,json,datetime as d; a=json.load(sys.stdin)[\"archives\"][-1][\"time\"]; sys.exit(0 if (d.datetime.now()-d.datetime.fromisoformat(a)).total_seconds() < 172800 else 1)'"
+    chk "Borg: repo-mac (no repo-local left)" "test -d $BACKUP_DIR/repo-mac && test ! -e $BACKUP_DIR/repo-local && ! grep -q repo-local /home/$ADMIN_USER/.ssh/authorized_keys"
     chk "Borg: compact after prune"        "grep -q 'borg compact' /usr/local/bin/backup-server.sh"
     chk "Borg: daily timer"                "systemctl cat borg-backup.timer | grep -q 'OnCalendar=.*[0-9]:[0-9]'"
     chk "DB dumps not world-readable"      "! find /var/backups/nc /var/backups/immo -type f -perm /044 2>/dev/null | grep -q ."

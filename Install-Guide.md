@@ -301,7 +301,7 @@ docker compose up -d
 docker compose exec -u www-data app php occ upgrade
 ```
 
-## 3.3 Borg: initialise repo-local + add the keys
+## 3.3 Borg: initialise repo-mac + add the keys
 
 `[ ! Do ! ]` Mind the order.
 
@@ -315,7 +315,7 @@ mkdir -p /srv/hdd/backup/trigger && chown netzbub:netzbub /srv/hdd/backup/trigge
 content of the respective `.pub`, no angle brackets:
 
 ```
-command="borg serve --append-only --restrict-to-path /srv/hdd/backup/repo-local",restrict <CONTENT vps_borg.pub>
+command="borg serve --append-only --restrict-to-path /srv/hdd/backup/repo-mac",restrict <CONTENT vps_borg.pub>
 command="touch /srv/hdd/backup/trigger/.run-backup",restrict <CONTENT vps_trigger.pub>
 ```
 
@@ -331,31 +331,31 @@ The existing admin key stays as the first line, UNCHANGED.
 ssh -p 22022 -i ~/.ssh/vps_trigger netzbub@203.0.113.10   # must disconnect immediately
 ```
 
-**d) Initialise repo-local** (local machine; port/key in BORG_RSH, not in the URL):
+**d) Initialise repo-mac** (local machine; port/key in BORG_RSH, not in the URL):
 
 ```
 BORG_RSH="ssh -p 22022 -i ~/.ssh/server_ed25519" borg init --encryption=repokey-blake2 \
-  ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-local
+  ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-mac
 ```
 
 `[+ Info +]` Init with the admin key (full access); use the append-only `vps_borg` afterwards
-for `borg create`. You choose the repo-local passphrase here — save it (Parts 4.1/4.2).
+for `borg create`. You choose the repo-mac passphrase here — save it (Parts 4.1/4.2).
 
 **e) Backup chain** (local machine):
 
 ```
 BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg create \
-  ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-local::'{now}' /path/to/local/data
+  ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-mac::'{now}' /path/to/local/data
 ssh -p 22022 -i ~/.ssh/vps_trigger netzbub@203.0.113.10   # triggers the server backup
 ```
 
 **f) Restore test** (mandatory; without macFUSE via extract):
 
 ```
-BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg list ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-local
+BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg list ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-mac
 mkdir -p /tmp/borg-extract && cd /tmp/borg-extract
 BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg extract --list \
-  ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-local::ARCHIVE_NAME
+  ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-mac::ARCHIVE_NAME
 ```
 
 `[+ Info +]` `prune` (deleting old archives) is deliberately NOT possible with the
@@ -468,7 +468,7 @@ Internal check:
 |---|---|---|---|
 | 1 | SSH key `vps_borg` | user (local) | protects the private backup SSH key |
 | 2 | SSH key `vps_trigger` | user (local) | protects the trigger SSH key |
-| 3 | Borg repo `repo-local` | user, at `borg init` (3.3d) | protects the repo key of the local-machine backup |
+| 3 | Borg repo `repo-mac` | user, at `borg init` (3.3d) | protects the repo key of the local-machine backup |
 | 4 | Borg repo `repo-server` | auto (script) | `/root/install-secrets/borg-passphrase`, copied to `/root/.borg-passphrase` for the backup job. Repo the server backs itself into. Save it externally — without it AND the key export the backup is unreadable. |
 | 5 | Admin password | auto (script) | `/root/install-secrets/admin-user-password`. One password, three uses: `sudo`, the provider's VNC rescue console, and the Cockpit login. A typeable word sequence on purpose. **On paper too.** |
 | 6 | GRUB menu password | auto (script) | `/root/install-secrets/grub-password`. Protects editing the boot menu and the GRUB shell, not the boot itself. Lowercase and digits, because it is only ever typed at the VNC console. **Not recoverable.** |
@@ -482,8 +482,8 @@ and not only in the password manager that lives on the machine you cannot reach.
 `[ ! Do ! ]` Export the repo key and store it externally (password manager + paper):
 
 ```
-BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg key export ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-local ~/borg-key-repo-local-backup
-BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg key export --paper ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-local ~/borg-key-repo-local-backup.txt
+BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg key export ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-mac ~/borg-key-repo-mac-backup
+BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg key export --paper ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-mac ~/borg-key-repo-mac-backup.txt
 ```
 
 Two loss scenarios:
@@ -493,7 +493,7 @@ Two loss scenarios:
 - **Repo key damaged / server totally lost** → import the key (AND repo passphrase #3 needed):
 
 ```
-BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg key import ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-local ~/borg-key-repo-local-backup
+BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg key import ssh://netzbub@203.0.113.10/srv/hdd/backup/repo-mac ~/borg-key-repo-mac-backup
 ```
 
 ## 4.3 Directories / secrets / logs
@@ -511,7 +511,7 @@ BORG_RSH="ssh -p 22022 -i ~/.ssh/vps_borg" borg key import ssh://netzbub@203.0.1
 | NC data | `/srv/hdd/ncdata` | – | `/srv/hdd/ncdata/nextcloud.log` |
 | Caddy | `/etc/caddy/Caddyfile` | – | `journalctl -u caddy` |
 | Borg repo-server | `/srv/hdd/backup/repo-server` | `/root/.borg-passphrase` | `journalctl -u borg-backup` |
-| Borg repo-local | `/srv/hdd/backup/repo-local` | passphrase #3; key export in `~/` (local) | – |
+| Borg repo-mac | `/srv/hdd/backup/repo-mac` | passphrase #3; key export in `~/` (local) | – |
 | Portainer | `docker inspect portainer` | – | `docker logs portainer` |
 | Cockpit | – | – | `journalctl -u cockpit` |
 | Lynis | `/etc/lynis/default.prf` | – | `/var/log/lynis.log` |
