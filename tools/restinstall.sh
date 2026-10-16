@@ -41,7 +41,7 @@ schritt1() {
     install -m 700 -o root -g root /home/hubi/install-rev13.sh /root/install.sh
     rm -f /home/hubi/install-rev13.sh
     local kv k
-    for kv in 'IMMO_DOMAIN="silo2.brill.ing immo.brill.ing"' 'SMTP_ALARM_FROM="alarm@brill.ing"' \
+    for kv in 'IMMO_DOMAIN="immo.brill.ing"' 'SMTP_ALARM_FROM="alarm@brill.ing"' \
               'KEEP_SNAPD="yes"' 'NC_MAIL_FROM="next"' 'NC_MAIL_DOMAIN="brill.ing"' \
               'ENABLE_OFFICE="yes"' 'EO_DOMAIN="office.brill.ing"' 'ENABLE_CLAMAV="yes"'; do
         k=${kv%%=*}
