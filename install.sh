@@ -912,11 +912,7 @@ Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.
 # recommended by ssh-audit; curve25519 stays for older clients.
 KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
 MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
-# Rev.8 (CIS sshd_enable_warning_banner_net): without this line the legal text
-# written to /etc/issue.net in phase 5 is NEVER shown on an SSH login - the file
-# alone does nothing. Confirmed on the test server 2026-10-03: 'sshd -T' reported
-# 'banner none' through the whole first install run.
-Banner /etc/issue.net
+# Rev.14: no 'Banner' directive. The owner does not want a login banner.
 EOF
     # Rev.8: 600 on EVERY drop-in, not just our own - Ubuntu's cloud image ships
     # 60-cloudimg-settings.conf with 644 (CIS file_permissions_sshd_drop_in_config).
@@ -1486,23 +1482,12 @@ EOF
     else
         printf 'SHA_CRYPT_MAX_ROUNDS 65536\n' >> /etc/login.defs
     fi
-    # Legal banner before and after login (Lynis BANN-7126/7130).
-    # Rev.8: the first wording hit only FOUR of the key words Lynis looks for
-    # (access, authori, log, monitor) and the test demands FIVE, so both BANN checks
-    # stayed open through the first two runs - see /usr/share/lynis/include/tests_banners.
-    # The sentence added below is substantive, not keyword stuffing: it states that
-    # unauthorised use is prohibited and will be prosecuted, which is what makes a
-    # banner legally useful in the first place. Now at seven matches.
-    # No umlauts: the VNC console renders them wrong.
-    cat > /etc/issue <<'BANNEREOF'
-Zugang nur fuer Berechtigte. Alle Zugriffe auf dieses System werden
-protokolliert und ueberwacht. Unbefugte Nutzung ist verboten und wird
-strafrechtlich verfolgt.
-
-Authorised access only. All access to this system is logged and monitored.
-Unauthorised use is prohibited and will be prosecuted.
-BANNEREOF
-    cp /etc/issue /etc/issue.net
+    # Rev.14 (2026-10-16): NO legal banner. The owner never asked for one and does
+    # not want one; it deters nobody. Ubuntu's own default line stays in /etc/issue,
+    # /etc/issue.net is emptied, sshd has no 'Banner' directive and Cockpit shows
+    # none. Lynis BANN-7126/7130 stay open by the owner's decision.
+    printf 'Ubuntu \\n \\l\n\n' > /etc/issue
+    : > /etc/issue.net
     chmod 644 /etc/issue /etc/issue.net
     admin_pw_reminder
     printf 'TMOUT=%s\nreadonly TMOUT\nexport TMOUT\n' "$SHELL_TMOUT" > /etc/profile.d/99-tmout.sh; chmod 644 /etc/profile.d/99-tmout.sh
@@ -2723,7 +2708,6 @@ LoginTo=false
 
 [Session]
 IdleTimeout=15
-Banner=/etc/issue.net
 EOF
     chmod 644 /etc/cockpit/cockpit.conf
     printf 'root\n' > /etc/cockpit/disallowed-users
@@ -4090,14 +4074,12 @@ verify() {
     chk "NC trash bin 14 days"             "[[ \"\$(docker exec -u www-data nextcloud-app-1 php occ config:system:get trashbin_retention_obligation)\" == '14, 14' ]]"
     chk "GRUB without apparmor boot param" "! grep -rq 'apparmor=1' /etc/default/grub.d/ 2>/dev/null"
     # Rev.8 - the six findings from the CIS audit on the test server, 2026-10-03:
-    chk "sshd Banner active"               "sshd -T 2>/dev/null | grep -qi '^banner /etc/issue.net'"
     chk "sshd drop-ins mode 600"           "! find /etc/ssh/sshd_config.d -name '*.conf' -perm /077 | grep -q ."
     chk "fs.suid_dumpable=0 at runtime"    "[[ \"\$(sysctl -n fs.suid_dumpable)\" == 0 ]]"
     chk "apport masked"                    "[[ \"\$(systemctl is-enabled apport 2>/dev/null)\" == masked ]]"
     chk "group wheel exists and is empty"  "getent group wheel | grep -q ':\$'"
     chk "useradd INACTIVE=30"              "grep -qE '^INACTIVE=30' /etc/default/useradd"
     chk "umask 027 in bash.bashrc"         "grep -qE '^umask 027' /etc/bash.bashrc"
-    chk "banner hits >=5 Lynis keywords"   "( c=0; for w in audit access authori condition connect consent continu criminal enforce evidence forbidden intrusion law legal legislat log monitor owner penal policy policies privacy private prohibited prosecute record report restricted secure subject system terms warning; do grep -qi \"\$w\" /etc/issue && c=\$((c+1)); done; [[ \$c -ge 5 ]] )"
     chk "sysstat collecting"               "grep -qE '^ENABLED=\"?true' /etc/default/sysstat"
     # Rev.9 - swap:
     chk "vm.swappiness=10"                 "[[ \"\$(sysctl -n vm.swappiness)\" == 10 ]]"
