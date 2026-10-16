@@ -94,6 +94,7 @@ schritt2() {
     h "2e Websites (phase14) und Caddy"
     sich /etc/caddy /srv/www
     phase14 || echo "FEHLER phase14"
+    # Sites to probe come from install.conf, not from a hardcoded list.
     for s in $IMMO_DOMAIN $EXTRA_SITES $NC_DOMAIN $EO_DOMAIN; do
         printf '  %-20s %s   /.env %s\n' "$s" "$(curl -s -o /dev/null -w '%{http_code}' https://$s/)" "$(curl -s -o /dev/null -w '%{http_code}' https://$s/.env)"
     done

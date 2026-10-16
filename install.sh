@@ -2358,8 +2358,8 @@ for a in approval calendar camerarawpreviews classic_appmenu contacts deck \
         || echo "WARN: app $a not available"
 done
 # Apps that phone home or are not wanted (weather: met.no/nominatim, survey, support,
-# announcements: pushfeed.nextcloud.com) - the owner 2026-10-09. Tables, Collectives and
-# Better App Menu switched off by the owner on 2026-10-11 (side_menu is the menu).
+# announcements: pushfeed.nextcloud.com) - owner's decision 2026-10-09. Tables, Collectives
+# and Better App Menu switched off by the owner on 2026-10-11 (side_menu is the menu).
 for a in better_app_menu circles collectives federation nextcloud_announcements office \
          recommendations support survey_client tables weather_status; do
     $OCC app:disable "$a" >/dev/null 2>&1 || true
@@ -3190,7 +3190,7 @@ EOF
         warn "No $IMMO_DIR/requirements.txt - venv not built. Deploy the code, then run phase13 again."
     fi
 
-    # --- Daily run. Replaces the launchd agent the launchd agent on the Mac on the Mac.
+    # --- Daily run. Replaces the launchd agent that used to run this on the Mac.
     cat > /etc/systemd/system/immo-lauf.service <<EOF
 [Unit]
 Description=immo.flow daily run
